@@ -1,0 +1,51 @@
+{
+  "name": "@ericdisero/aurora-shared",
+  "version": "0.2.0",
+  "description": "Shared operations layer for the Aurora MCP server and CLI: storage, Suno/MVSEP provider clients, background jobs, and the single tool surface both consume. Most users want @ericdisero/aurora-mcp-server or @ericdisero/aurora-cli instead.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./operations": "./dist/operations/index.js"
+  },
+  "files": ["dist", "!dist/**/*.map", "skills", "README.md"],
+  "scripts": {
+    "build": "node scripts/embed-skills.mjs && tsc",
+    "typecheck": "node scripts/embed-skills.mjs && tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricDisero/aurora-mcp.git",
+    "directory": "packages/shared"
+  },
+  "keywords": [
+    "aurora",
+    "mcp",
+    "model-context-protocol",
+    "ai-music",
+    "music-generation",
+    "stem-separation",
+    "suno",
+    "mvsep",
+    "claude"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "better-sqlite3": "^11.6.0",
+    "uuid": "^11.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "typescript": "^5.7.0"
+  }
+}

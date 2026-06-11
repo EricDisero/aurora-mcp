@@ -1,0 +1,22 @@
+# Smithery registry config — stdio server via npx.
+# PREPPED ONLY: do not submit without Eric's go (GTM-adjacent).
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      SUNO_API_KEY:
+        type: string
+        description: sunoapi.org API key (primary Suno provider)
+      MVSEP_API_KEY:
+        type: string
+        description: MVSEP API key (stem separation)
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@ericdisero/aurora-mcp-server'],
+      env: {
+        ...(config.SUNO_API_KEY ? { SUNO_API_KEY: config.SUNO_API_KEY } : {}),
+        ...(config.MVSEP_API_KEY ? { MVSEP_API_KEY: config.MVSEP_API_KEY } : {})
+      }
+    })

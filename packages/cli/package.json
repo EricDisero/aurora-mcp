@@ -1,0 +1,49 @@
+{
+  "name": "@ericdisero/aurora-cli",
+  "version": "0.2.0",
+  "description": "Aurora CLI: drive the Aurora AI audio workbench from your terminal or let Claude Code shell out to it. Music generation, covers, sample manufacturing, 7-stem separation, stack export — plus bundled agent skills and an MCP configurator.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aurora": "dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": ["dist", "!dist/**/*.map", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricDisero/aurora-mcp.git",
+    "directory": "packages/cli"
+  },
+  "keywords": [
+    "aurora",
+    "cli",
+    "mcp",
+    "model-context-protocol",
+    "ai-music",
+    "music-generation",
+    "stem-separation",
+    "suno",
+    "mvsep",
+    "claude",
+    "claude-code",
+    "agent-skills"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@ericdisero/aurora-shared": "0.2.0",
+    "commander": "^12.1.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.7.0"
+  }
+}

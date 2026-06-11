@@ -1,0 +1,50 @@
+{
+  "name": "@ericdisero/aurora-mcp-server",
+  "version": "0.2.0",
+  "description": "MCP server for Aurora, the AI audio workbench. Your AI agent (Claude, Cursor, or any MCP client) drives music generation, covers, sample manufacturing, 7-stem separation, and DAW-ready stem organization. Files land on disk.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aurora-mcp-server": "./dist/server.js"
+  },
+  "main": "./dist/server.js",
+  "files": ["dist", "!dist/**/*.map", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EricDisero/aurora-mcp.git",
+    "directory": "packages/mcp"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "ai-music",
+    "music-generation",
+    "stem-separation",
+    "suno",
+    "mvsep",
+    "claude",
+    "claude-desktop",
+    "cursor",
+    "aurora"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@ericdisero/aurora-shared": "0.2.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.7.0"
+  }
+}
