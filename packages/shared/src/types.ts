@@ -12,11 +12,26 @@ export interface Project {
   updatedAt: number
 }
 
+/** A subfolder inside a project (a "track" in a multi-track release). Schema v3.
+ *  Track-assigned assets nest on disk as <proj>/<track dirName>/{generations,…};
+ *  unfiled assets (track_id NULL) stay flat at the project root. */
+export interface Track {
+  id: string
+  projectId: string
+  name: string
+  dirName: string
+  sortOrder: number
+  createdAt: number
+  updatedAt: number
+}
+
 export type AssetKind = 'generation' | 'cover' | 'import' | 'reference' | 'master'
 
 export interface ProjectAsset {
   id: string
   projectId: string
+  /** Track (project subfolder) this asset belongs to; null = unfiled. */
+  trackId?: string | null
   kind: AssetKind
   name: string
   /** Absolute path to the audio file on disk. */
@@ -24,6 +39,8 @@ export interface ProjectAsset {
   origin?: Record<string, unknown> | null
   sourceAssetId?: string | null
   refId?: string | null
+  /** Persisted favorite flag (schema v3). */
+  favorite: boolean
   createdAt: number
 }
 
@@ -59,20 +76,6 @@ export interface ReferenceTrack {
   cachedCurvePath: string | null
   curveStatus: 'none' | 'analyzing' | 'cached' | 'error'
   createdAt: number
-}
-
-export interface StackLane {
-  id: string
-  sourceId?: string
-  name: string
-  /** Absolute audio path — the truth. */
-  path: string
-  color?: string
-  gainDb: number
-  mute: boolean
-  solo: boolean
-  /** Clip start offset from timeline zero, in seconds. */
-  offsetSec: number
 }
 
 export interface AppSettings {

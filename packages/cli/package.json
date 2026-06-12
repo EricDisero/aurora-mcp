@@ -1,7 +1,7 @@
 {
   "name": "@ericdisero/aurora-cli",
-  "version": "0.2.0",
-  "description": "Aurora CLI: drive the Aurora AI audio workbench from your terminal or let Claude Code shell out to it. Music generation, covers, sample manufacturing, 7-stem separation, stack export — plus bundled agent skills and an MCP configurator.",
+  "version": "0.3.0",
+  "description": "Aurora CLI: drive the Aurora AI audio workbench from your terminal or let Claude Code shell out to it. Music generation, covers, sample manufacturing, 7-stem separation — plus bundled agent skills and an MCP configurator.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -38,7 +38,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@ericdisero/aurora-shared": "0.2.0",
+    "@ericdisero/aurora-shared": "0.3.0",
     "commander": "^12.1.0",
     "zod": "^3.23.0"
   },

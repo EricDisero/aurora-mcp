@@ -1,6 +1,6 @@
 # @ericdisero/aurora-mcp-server
 
-Stdio MCP server for **Aurora**, the AI audio workbench. Gives Claude (or any MCP client) full control of a local music library: generate tracks, style-transform covers, manufacture key/tempo-locked samples, split anything into 7 stems, layer the stack, export DAW-ready aligned WAVs. **27 tools.** Files land on disk in real project folders the Aurora app shows live.
+Stdio MCP server for **Aurora**, the AI audio workbench. Gives Claude (or any MCP client) full control of a local music library: generate tracks, style-transform covers, manufacture key/tempo-requested samples, split anything into 7 stems. **31 tools.** Files land on disk in real project folders the Aurora app shows live.
 
 ## Install
 

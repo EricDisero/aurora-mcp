@@ -60,14 +60,14 @@ Same surface as generate PLUS `uploadUrl` (required; hosted file from the File U
 | Param | Type | Required | Default | Range |
 |---|---|---|---|---|
 | `prompt` | string | yes | — | ≤500 chars |
-| `model` | string | yes | — | `V5` only |
+| `model` | string | yes | — | `V5` only (kie.ai mirror also lists `V5_5` — provider discrepancy, runtime untested) |
 | `soundLoop` | boolean | no | false | loopable output |
 | `soundTempo` | integer | no | auto | 1–300 BPM |
 | `soundKey` | string | no | `Any` | C..B, Cm..Bm (sharps as C#, no flats) |
 | `grabLyrics` | boolean | no | — | capture lyric subtitles |
 | `callBackUrl` | URI | no | — | optional here |
 
-Semantics: textural/ambient/loop material, not one-shot drum hits.
+Semantics (Suno release notes + help center, verified 2026-06-12): one-shots AND loops across three named categories — musical samples & drum kits ("deep 808 kick drum one shot", "crisp hip hop snare", "tight clap", "bongo pattern loop"), musical loops (guitar riffs, basslines, synth licks), SFX/foley/ambient. One-shot drum hits are an official category (earlier "not one-shot drum hits" note here was wrong). Duration officially undocumented; community-measured ~2s one-shots / 2-13s loops (Jan 2026, med confidence). Key/tempo adherence + loop seamlessness unverified — QA every keeper. Receipts: second-brain `business/projects/aurora-docs/suno-sounds-and-prompting-2026-06.md`.
 
 ## POST /api/v1/generate/add-vocals (aurora_add_vocals) — NEW op 2026-06-10
 
@@ -85,4 +85,4 @@ Inverse: generates backing instrumentation complementary to an uploaded audio (u
 
 ## Wire endpoints documented but NOT exposed as ops (deliberate, revisit on demand)
 
-upload-and-extend / extend-music, replace-section, generate-mashup, cover-suno (style-only cover of a Suno track), generate-persona + boost-music-style, generate-lyrics (+ timestamped lyrics), Suno Voice (custom voices), music video, generate-midi (we rip MIDI locally), separate-vocals (MVSEP path is stronger). Persona PARAMS are exposed on generate/cover; creating personas is not an op yet.
+upload-and-extend / extend-music, replace-section, generate-mashup, cover-suno (style-only cover of a Suno track), generate-persona + boost-music-style, generate-lyrics (+ timestamped lyrics), Suno Voice (custom voices), music video, generate-midi (we rip MIDI locally), separate-vocals (MVSEP path is stronger). Persona PARAMS are exposed on generate/cover; creating personas is not an op yet. generate-persona wire facts (verified 2026-06-12, for when it's promoted): requires `taskId` + `audioId` of a completed generation — no text-only path; optional `vocalStart`/`vocalEnd` select a 10-30s analysis segment; source task must be >v3.5 models; returned `personaId` works on generate / extend / upload-cover / upload-extend (customMode required).

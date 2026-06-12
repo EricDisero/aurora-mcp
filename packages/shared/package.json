@@ -1,6 +1,6 @@
 {
   "name": "@ericdisero/aurora-shared",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared operations layer for the Aurora MCP server and CLI: storage, Suno/MVSEP provider clients, background jobs, and the single tool surface both consume. Most users want @ericdisero/aurora-mcp-server or @ericdisero/aurora-cli instead.",
   "license": "MIT",
   "type": "module",

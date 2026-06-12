@@ -18,7 +18,7 @@ const program = new Command()
 program
   .name('aurora')
   .description(
-    'Aurora AI audio workbench CLI — generation, covers, sounds, 7-stem splits, stack export. ' +
+    'Aurora AI audio workbench CLI — generation, covers, sounds, 7-stem splits. ' +
       'Agent-first: `aurora run <op> --key value` mirrors the MCP tool surface.'
   )
   .version(pkg.version)

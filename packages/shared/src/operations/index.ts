@@ -41,8 +41,18 @@ import {
   getAsset,
   insertAsset,
   listAssets,
+  setAssetFavorite,
+  setAssetTrack,
   updateAssetPath
 } from '../storage/assets.js'
+import {
+  createTrack,
+  deleteTrack,
+  getTrack,
+  getTrackDirectory,
+  listTracks,
+  renameTrack
+} from '../storage/tracks.js'
 import { getProjectStems, getStems } from '../storage/stems.js'
 import { advanceJob, listJobs, loadJob, newJobManifest, saveJob, type JobManifest } from '../jobs.js'
 import { createSplitJobs, prepareSplit } from '../split.js'
@@ -54,7 +64,6 @@ import {
 } from '../extract-catalog.js'
 import { probeDurationSeconds, standardizeToWav, convertToMp3, pitchShift } from '../audio/ffmpeg.js'
 import { runRipMidi, runRvcUpscale } from '../sidecars.js'
-import { addLane, exportStackBundle, laneNameFromPath, loadStack, removeLane, updateLane } from '../stack.js'
 import { SKILLS } from '../skills/content.js'
 import type { ProjectAsset } from '../types.js'
 
@@ -84,6 +93,26 @@ const BACKGROUND_DESCRIBE =
   'Submit and return immediately with a jobId instead of blocking. Poll aurora_get_job_status ' +
   'every 10-20s. Status includes streamUrls you can hand the user to LISTEN mid-generation, ' +
   'before files land. Jobs survive process restarts (provider-side state).'
+
+const landingTrackIdSchema = z
+  .string()
+  .optional()
+  .describe(
+    'Land the output in this track (project subfolder — aurora_list_tracks shows ids). Omit = project root'
+  )
+
+/** Validate a landing trackId: must exist and belong to the target project.
+ *  Loud error (not silent root-landing) — agents should know they missed. */
+function resolveLandingTrack(projectId: string, trackId?: string): string | null {
+  if (!trackId) return null
+  const track = getTrack(trackId)
+  if (!track || track.projectId !== projectId) {
+    throw new Error(
+      `Track ${trackId} does not exist in project ${projectId} — call aurora_list_tracks for valid ids.`
+    )
+  }
+  return trackId
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
@@ -210,6 +239,7 @@ const getWorkspaceState: Operation<{ projectId?: string }> = {
       activeProject = {
         ...p,
         directory: getProjectDirectory(p.id),
+        tracks: listTracks(p.id),
         assets: listAssets(p.id),
         stems: getProjectStems(p.id)
       }
@@ -305,36 +335,150 @@ const listAssetsOp: Operation<{ projectId: string }> = {
   }
 }
 
-// ── Asset management ────────────────────────────────────────────
+// ── Tracks (project subfolders — one per song in a multi-track release) ──
 
-const importFileOp: Operation<{ projectId: string; filePath: string }> = {
-  id: 'aurora_import_file',
+const createTrackOp: Operation<{ projectId: string; name: string }> = {
+  id: 'aurora_create_track',
   description:
-    "Copy an external audio file into a project as an 'import' asset (lands in <project>/imports/). " +
-    'Any asset can then be split, covered, stacked, or pitch-shifted.',
+    'Create a track inside a project — a real on-disk subfolder (one per song in a multi-track ' +
+    'release, e.g. each cue of a soundtrack). Assets filed to a track nest under ' +
+    '<project>/<track-slug>/; unfiled assets stay at the project root.',
   input: z.object({
     projectId: z.string(),
-    filePath: z.string().describe('Absolute path to the audio file to import')
+    name: z.string().min(1).describe('Track name, e.g. "Main Theme"')
   }),
   async run(input) {
-    if (!existsSync(input.filePath)) throw new Error(`File not found: ${input.filePath}`)
-    const asset = await addFileAsset({ projectId: input.projectId, kind: 'import', filePath: input.filePath })
+    const track = await createTrack(input.projectId, input.name)
+    return ok({ track, directory: getTrackDirectory(track.id) })
+  }
+}
+
+const listTracksOp: Operation<{ projectId: string }> = {
+  id: 'aurora_list_tracks',
+  description:
+    'List the tracks (subfolders) of a project with per-track asset counts. Assets with trackId ' +
+    'null are unfiled (project root).',
+  input: z.object({ projectId: z.string() }),
+  async run(input) {
+    const project = getProject(input.projectId)
+    if (!project) throw new Error(`Project not found: ${input.projectId}`)
+    const tracks = listTracks(input.projectId)
+    const assets = listAssets(input.projectId)
+    const countByTrack = new Map<string, number>()
+    for (const a of assets) {
+      const key = a.trackId ?? 'unfiled'
+      countByTrack.set(key, (countByTrack.get(key) ?? 0) + 1)
+    }
+    return ok({
+      project: { id: project.id, name: project.name },
+      tracks: tracks.map((t) => ({
+        ...t,
+        directory: getTrackDirectory(t.id),
+        assetCount: countByTrack.get(t.id) ?? 0
+      })),
+      unfiledCount: countByTrack.get('unfiled') ?? 0
+    })
+  }
+}
+
+const renameTrackOp: Operation<{ trackId: string; name: string }> = {
+  id: 'aurora_rename_track',
+  description: 'Rename a track (display name only — the on-disk subfolder keeps its slug).',
+  input: z.object({ trackId: z.string(), name: z.string().min(1) }),
+  async run(input) {
+    if (!getTrack(input.trackId)) throw new Error(`Track not found: ${input.trackId}`)
+    return ok({ track: renameTrack(input.trackId, input.name) })
+  }
+}
+
+const deleteTrackOp: Operation<{ trackId: string }> = {
+  id: 'aurora_delete_track',
+  description:
+    'Delete a track NON-destructively: every asset filed to it moves back to the project root ' +
+    '(files relocate on disk, nothing is deleted), then the empty subfolder is removed.',
+  input: z.object({ trackId: z.string() }),
+  async run(input) {
+    const track = getTrack(input.trackId)
+    if (!track) throw new Error(`Track not found: ${input.trackId}`)
+    await deleteTrack(input.trackId)
+    return ok(
+      { deleted: track.id },
+      `Deleted track "${track.name}". Its assets moved back to the project root.`
+    )
+  }
+}
+
+const setAssetTrackOp: Operation<{ assetId: string; trackId: string | null }> = {
+  id: 'aurora_set_asset_track',
+  description:
+    'File an asset to a track (or null = unfiled / project root). Physically moves the audio file ' +
+    'plus its stems/ and extracts/ folders into the track subfolder and rewrites stored paths.',
+  input: z.object({
+    assetId: z.string(),
+    trackId: z
+      .string()
+      .nullable()
+      .describe('Target track id, or null to move the asset back to the project root')
+  }),
+  async run(input) {
+    const asset = await setAssetTrack(input.assetId, input.trackId)
     return ok({ asset })
   }
 }
 
-const addReferenceOp: Operation<{ projectId: string; filePath: string }> = {
+const favoriteAssetOp: Operation<{ assetId: string; favorite: boolean }> = {
+  id: 'aurora_favorite_asset',
+  description:
+    "Set or clear an asset's persisted favorite flag (the Library's favorites-only filter keys off it).",
+  input: z.object({ assetId: z.string(), favorite: z.boolean() }),
+  async run(input) {
+    const asset = setAssetFavorite(input.assetId, input.favorite)
+    return ok({ asset })
+  }
+}
+
+// ── Asset management ────────────────────────────────────────────
+
+const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
+  id: 'aurora_import_file',
+  description:
+    "Copy an external audio file into a project as an 'import' asset (lands in <project>/imports/, " +
+    "or the track's imports/ if trackId is given). Any asset can then be split, covered, or pitch-shifted.",
+  input: z.object({
+    projectId: z.string(),
+    trackId: z.string().optional().describe('File the import into this track subfolder'),
+    filePath: z.string().describe('Absolute path to the audio file to import')
+  }),
+  async run(input) {
+    if (!existsSync(input.filePath)) throw new Error(`File not found: ${input.filePath}`)
+    const asset = await addFileAsset({
+      projectId: input.projectId,
+      trackId: input.trackId ?? null,
+      kind: 'import',
+      filePath: input.filePath
+    })
+    return ok({ asset })
+  }
+}
+
+const addReferenceOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
   id: 'aurora_add_reference',
   description:
     "Copy an audio file into a project as a 'reference' asset (lands in <project>/references/ and " +
     "registers in the global reference library the mastering flow keys off). References can be split too.",
   input: z.object({
     projectId: z.string(),
+    trackId: z.string().optional().describe('File the reference into this track subfolder'),
     filePath: z.string().describe('Absolute path to the reference audio file')
   }),
   async run(input) {
     if (!existsSync(input.filePath)) throw new Error(`File not found: ${input.filePath}`)
-    const asset = await addFileAsset({ projectId: input.projectId, kind: 'reference', filePath: input.filePath })
+    const asset = await addFileAsset({
+      projectId: input.projectId,
+      trackId: input.trackId ?? null,
+      kind: 'reference',
+      filePath: input.filePath
+    })
     return ok({ asset })
   }
 }
@@ -434,6 +578,7 @@ const generateOp: Operation<{
   personaId?: string
   personaModel?: 'style_persona' | 'voice_persona'
   projectId?: string
+  trackId?: string
   background?: boolean
 }> = {
   id: 'aurora_generate',
@@ -478,6 +623,7 @@ const generateOp: Operation<{
     personaId: personaIdSchema,
     personaModel: personaModelSchema,
     projectId: z.string().optional().describe('Target project (auto-created from the title/prompt when omitted)'),
+    trackId: landingTrackIdSchema,
     background: z.boolean().optional().describe('Return a jobId immediately instead of waiting')
   }),
   async run(input) {
@@ -493,6 +639,7 @@ const generateOp: Operation<{
     const model = (input.model ?? DEFAULT_GEN_MODEL).replace(/\./g, '_')
     const baseName = input.title?.trim() || input.prompt.slice(0, 60).trim() || 'Generated track'
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
 
     const taskId = await createGeneration({
       prompt: input.prompt,
@@ -532,6 +679,7 @@ const generateOp: Operation<{
       },
       { taskId }
     )
+    manifest.trackId = trackId
     await saveJob(manifest)
 
     if (input.background) {
@@ -549,6 +697,7 @@ const soundsOp: Operation<{
   loop?: boolean
   grabLyrics?: boolean
   projectId?: string
+  trackId?: string
   background?: boolean
 }> = {
   id: 'aurora_sounds',
@@ -563,11 +712,13 @@ const soundsOp: Operation<{
     loop: z.boolean().optional().describe('Generate as a loopable sound'),
     grabLyrics: z.boolean().optional().describe('Also capture lyric subtitles when the sound has vocals'),
     projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
     background: z.boolean().optional()
   }),
   async run(input) {
     const baseName = input.prompt.slice(0, 60).trim() || 'Sound'
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
 
     const taskId = await createSoundsGeneration({
       prompt: input.prompt,
@@ -593,6 +744,7 @@ const soundsOp: Operation<{
       },
       { taskId }
     )
+    manifest.trackId = trackId
     await saveJob(manifest)
 
     if (input.background) {
@@ -658,6 +810,7 @@ const coverOp: Operation<{
   personaId?: string
   personaModel?: 'style_persona' | 'voice_persona'
   projectId?: string
+  trackId?: string
   background?: boolean
   fetchWav?: boolean
 }> = {
@@ -694,6 +847,7 @@ const coverOp: Operation<{
     personaId: personaIdSchema,
     personaModel: personaModelSchema,
     projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
     background: z.boolean().optional(),
     fetchWav: z
       .boolean()
@@ -730,6 +884,7 @@ const coverOp: Operation<{
         })())
       : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
 
+    const trackId = resolveLandingTrack(projectId, input.trackId)
     const uploadUrl = await uploadSourceAudio(sourcePath)
     const taskId = await createCover({
       uploadUrl,
@@ -770,6 +925,7 @@ const coverOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.trackId = trackId
     await saveJob(manifest)
 
     if (input.background) {
@@ -809,6 +965,7 @@ const addVocalsOp: Operation<{
   audioWeight?: number
   model?: string
   projectId?: string
+  trackId?: string
   background?: boolean
   fetchWav?: boolean
 }> = {
@@ -840,6 +997,7 @@ const addVocalsOp: Operation<{
     audioWeight: audioWeightSchema,
     model: z.string().optional().describe('V4_5PLUS (default) | V5 | V5_5 — this endpoint supports only these'),
     projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: also fetch the provider WAV per variation (default true)')
   }),
@@ -853,6 +1011,7 @@ const addVocalsOp: Operation<{
         })())
       : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
 
+    const trackId = resolveLandingTrack(projectId, input.trackId)
     const uploadUrl = await uploadSourceAudio(sourcePath)
     const taskId = await createAddVocals({
       uploadUrl,
@@ -887,6 +1046,7 @@ const addVocalsOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.trackId = trackId
     await saveJob(manifest)
 
     if (input.background) {
@@ -929,6 +1089,7 @@ const addInstrumentalOp: Operation<{
   audioWeight?: number
   model?: string
   projectId?: string
+  trackId?: string
   background?: boolean
   fetchWav?: boolean
 }> = {
@@ -953,6 +1114,7 @@ const addInstrumentalOp: Operation<{
     audioWeight: audioWeightSchema,
     model: z.string().optional().describe('V4_5PLUS (default) | V5 | V5_5 — this endpoint supports only these'),
     projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: also fetch the provider WAV per variation (default true)')
   }),
@@ -965,6 +1127,7 @@ const addInstrumentalOp: Operation<{
           throw new Error(`Project not found: ${input.projectId}`)
         })())
       : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
 
     const uploadUrl = await uploadSourceAudio(sourcePath)
     const taskId = await createAddInstrumental({
@@ -998,6 +1161,7 @@ const addInstrumentalOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.trackId = trackId
     await saveJob(manifest)
 
     if (input.background) {
@@ -1369,122 +1533,6 @@ const ripMidiOp: Operation<{
   }
 }
 
-// ── Stack (minimal layer view) ──────────────────────────────────
-
-const stackListOp: Operation<{ projectId: string }> = {
-  id: 'aurora_stack_list',
-  description: "A project's stack lanes (the minimal layer view: name, path, offset, gain, mute/solo).",
-  input: z.object({ projectId: z.string() }),
-  async run(input) {
-    return ok({ lanes: await loadStack(input.projectId) })
-  }
-}
-
-const stackAddLaneOp: Operation<{
-  projectId: string
-  assetId?: string
-  stemType?: string
-  path?: string
-  name?: string
-  offsetSec?: number
-  gainDb?: number
-}> = {
-  id: 'aurora_stack_add_lane',
-  description:
-    'Add a lane to the project stack from an asset, a stem (assetId + stemType), or a raw path. The app ' +
-    'shows the same stack live (stack.json in the project folder).',
-  input: z.object({
-    projectId: z.string(),
-    assetId: z.string().optional(),
-    stemType: z.string().optional().describe('With assetId: pick that stem instead of the asset audio'),
-    path: z.string().optional(),
-    name: z.string().optional(),
-    offsetSec: z.number().min(0).optional().describe('Clip start offset from timeline zero (default 0)'),
-    gainDb: z.number().optional().describe('Lane gain in dB (default 0)')
-  }),
-  async run(input) {
-    let path = input.path
-    let sourceId: string | undefined
-    let name = input.name
-    if (input.assetId) {
-      if (input.stemType) {
-        const stem = getStems(input.assetId).find((s) => s.stemType === input.stemType)
-        if (!stem) throw new Error(`Asset ${input.assetId} has no "${input.stemType}" stem.`)
-        path = stem.path
-        sourceId = stem.id
-        name ??= input.stemType
-      } else {
-        const asset = getAsset(input.assetId)
-        if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
-        path = asset.path
-        sourceId = asset.id
-        name ??= asset.name
-      }
-    }
-    if (!path) throw new Error('Provide assetId (optionally with stemType) or path.')
-    name ??= laneNameFromPath(path)
-
-    const lane = await addLane(input.projectId, {
-      name,
-      path,
-      sourceId,
-      offsetSec: input.offsetSec,
-      gainDb: input.gainDb
-    })
-    return ok({ lane })
-  }
-}
-
-const stackUpdateLaneOp: Operation<{
-  projectId: string
-  laneId: string
-  offsetSec?: number
-  gainDb?: number
-  mute?: boolean
-  solo?: boolean
-  name?: string
-}> = {
-  id: 'aurora_stack_update_lane',
-  description: "Update a stack lane's offset, gain, mute, solo, or name.",
-  input: z.object({
-    projectId: z.string(),
-    laneId: z.string(),
-    offsetSec: z.number().min(0).optional(),
-    gainDb: z.number().optional(),
-    mute: z.boolean().optional(),
-    solo: z.boolean().optional(),
-    name: z.string().optional()
-  }),
-  async run(input) {
-    const { projectId, laneId, ...patch } = input
-    const lane = await updateLane(projectId, laneId, patch)
-    return ok({ lane })
-  }
-}
-
-const stackRemoveLaneOp: Operation<{ projectId: string; laneId: string }> = {
-  id: 'aurora_stack_remove_lane',
-  description: 'Remove a lane from the project stack.',
-  input: z.object({ projectId: z.string(), laneId: z.string() }),
-  async run(input) {
-    await removeLane(input.projectId, input.laneId)
-    return ok({ removed: input.laneId })
-  }
-}
-
-const stackExportOp: Operation<{ projectId: string }> = {
-  id: 'aurora_stack_export',
-  description:
-    'Export the stack as an aligned multi-WAV bundle: one 32-bit float WAV per audible lane, padded ' +
-    'with leading silence to common timeline zero — drop them all at time zero in any DAW and ' +
-    'everything lines up sample-accurately. Lands in <project>/stack-export/.',
-  input: z.object({ projectId: z.string() }),
-  async run(input) {
-    const paths = await exportStackBundle(input.projectId)
-    return ok({ paths }, `Exported ${paths.length} aligned WAV(s):\n${paths.join('\n')}`)
-  }
-}
-
 // ── Skills delivery (MCP-only clients) ──────────────────────────
 
 const getPromptingGuideOp: Operation<{ topic?: string }> = {
@@ -1519,6 +1567,12 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
   renameProjectOp,
   deleteProjectOp,
   listAssetsOp,
+  createTrackOp,
+  listTracksOp,
+  renameTrackOp,
+  deleteTrackOp,
+  setAssetTrackOp,
+  favoriteAssetOp,
   importFileOp,
   addReferenceOp,
   deleteAssetOp,
@@ -1536,10 +1590,5 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
   convertOp,
   rvcUpscaleOp,
   ripMidiOp,
-  stackListOp,
-  stackAddLaneOp,
-  stackUpdateLaneOp,
-  stackRemoveLaneOp,
-  stackExportOp,
   getPromptingGuideOp
 ] as unknown as ReadonlyArray<Operation<unknown>>

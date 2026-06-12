@@ -21,10 +21,9 @@ aurora-mcp/
     │     providers/{suno,mvsep}.ts ← provider clients (+ single-shot poll fetchers)
     │     split.ts              ← 3-job orchestration, PER-STEM PROGRESSIVE landing
     │     jobs.ts               ← background-job manifests (userData/agent-jobs/)
-    │     stack.ts              ← stack.json CRUD + aligned multi-WAV export math
     │     sidecars.ts           ← RVC/MIDI python spawns (need AURORA_REPO env)
     │     audio/{ffmpeg,wav}.ts ← @ffmpeg-installer ops + RIFF codec (port)
-    │     operations/index.ts   ← single source of truth for the 27-tool surface
+    │     operations/index.ts   ← single source of truth for the 31-tool surface
     ├── mcp/                    ← @ericdisero/aurora-mcp-server (bin: aurora-mcp-server)
     └── cli/                    ← @ericdisero/aurora-cli (bin: aurora)
         src/commands/{op,install-skills,keys,status,mcp}.ts
@@ -34,8 +33,8 @@ aurora-mcp/
 
 - **Never duplicate operation logic.** Both surfaces register the same `ALL_OPERATIONS` array. New tool = one edit in `packages/shared/src/operations/index.ts`.
 - **Op schemas expose the FULL wire surface with sane defaults — curation is the app's job, never the MCP's** (locked 2026-06-10; the agent layer ships with MORE control than the app, never less). Param contract for the Suno ops: `docs/suno-param-surface.md`.
-- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` at v2 (v2 = `extraction_stems`) and REFUSES to open a newer-versioned DB. If the app gains a v3 migration, port it here in the same session and bump `KNOWN_SCHEMA_VERSION`.
-- **Storage-semantics lockstep.** `storage/*.ts`, `split.ts`, and `stack.ts` are ports of the app's modules (see the contract table below) — behavior changes go into BOTH codebases or neither.
+- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` at v3 (v2 = `extraction_stems`; v3 = `tracks` + `project_assets.track_id`/`favorite`, 2026-06-12) and REFUSES to open a newer-versioned DB. If the app gains a v4 migration, port it here in the same session and bump `KNOWN_SCHEMA_VERSION`.
+- **Storage-semantics lockstep.** `storage/*.ts` and `split.ts` are ports of the app's modules (see the contract table below) — behavior changes go into BOTH codebases or neither.
 - **Provider URLs expire server-side.** Always download-and-persist; `streamUrls` are preview-only, never stored as asset paths.
 - **Destructive ops require `confirm: true`** (delete_asset, delete_project). Splits refuse to re-spend when 7 stems exist.
 - **NEVER commit.** Eric commits at his checkpoints.
@@ -49,6 +48,7 @@ Every op's logic traces to a verified aurora module. Drift check = diff these pa
 | aurora_get_credits | `tools/bridge/lib/kie.ts getRemainingCredits` + MVSEP `/api/app/user` (live-docs verified 2026-06-10) |
 | aurora_get_workspace_state / list_projects / create_project / rename_project / delete_project | `src/main/storage/projects.ts` |
 | aurora_list_assets / import_file / add_reference / delete_asset | `src/main/storage/assets.ts` (+`references.ts`) |
+| aurora_create/list/rename/delete_track / set_asset_track / favorite_asset | NEW 2026-06-12 — `src/main/storage/tracks.ts` + `assets.ts setAssetTrack/setAssetFavorite` (schema v3; set_asset_track physically moves file+stems/extracts and re-points `reference_tracks.audio_path`) |
 | aurora_fetch_wav | `suno-client.ts createWavConversion/pollWavConversion` + report §Phase 3 ("asset re-points at WAV, MP3 stays") |
 | aurora_generate | `ipc/generation.ts generation:generate` landing + `kie.ts createGeneration` |
 | aurora_sounds | `tools/bridge/commands/sounds.ts` + project landing per generation:generate |
@@ -59,10 +59,11 @@ Every op's logic traces to a verified aurora module. Drift check = diff these pa
 | aurora_get_job_status / list_jobs | new (bridge `lib/job.ts` manifest discipline + provider single-shot polls) |
 | aurora_pitch_shift / convert | `tools/bridge/lib/ffmpeg-ops.ts` + `commands/{pitch,convert}.ts` |
 | aurora_rvc_upscale / rip_midi | `src/main/rvc/upscale.ts` / `src/main/midi/rip.ts` (same args; resolution via AURORA_REPO) |
-| aurora_stack_* | `ipc/stack.ts` (stack.json shape) + `renderer stackStore.exportBundle` (padding math, Node port) |
 | aurora_get_prompting_guide | slates-mcp `resolveGuideTopic` pattern |
 
-Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) stack export standardizes non-44.1k sources via ffmpeg where the renderer's AudioContext resampled implicitly; (3) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
+Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
+
+**Removed features:** Stack (minimal layer-mixer + aligned-WAV export) was deleted from both this package and the app on 2026-06-12 — it was DAW-replacement creep and Suno samples aren't tempo/length-aligned anyway; **Mix** (analyze→mix→export, in-app, interactive) is the kept feature and is intentionally not agent-driven. Historical design reference (in case a grid-based layering tool is ever revisited): second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
 
 ## Build / test
 
@@ -78,7 +79,7 @@ Test against an isolated library: set `AURORA_USER_DATA=%TEMP%\aurora-mcp-test` 
 
 ## Publishing
 
-**0.2.0 is the current release (30 ops: +add_vocals, +add_instrumental, +extract; ultra-custom generate/cover schemas; schema v2). 0.1.0 was the first publish (2026-06-10 AM).** Next release: bump `version` in all THREE package.jsons AND the exact-version `@ericdisero/aurora-shared` dependency pins in packages/mcp + packages/cli (they must match shared's new version), then `npm run publish:all` from the root (shared lands before mcp/cli). Token in `~/.npmrc` (see second-brain `business/operations/account-logins.md` — needs read-write + ALL-packages scope; a package-scoped granular token 404s on new packages). Scope note: published under `@ericdisero/*` because the `auroradaw` npm org doesn't exist (free-tier org creation is web-UI-only — Eric's call whether to create it and republish under `@auroradaw/*`). github.com/EricDisero/aurora-mcp is PUBLIC (created + published 2026-06-10) — the npm listing's repo link resolves and Smithery submission is unblocked.
+**0.3.0 is the current release (31 ops; schema v3 — tracks + favorites + generate-into-track, Stack ops removed; published 2026-06-12). 0.2.0 (2026-06-10) was 30 ops / schema v2; 0.1.0 was the first publish (2026-06-10 AM). 0.3.0 CLIs/MCP refuse a v4+ DB by design.** Next release: bump `version` in all THREE package.jsons AND the exact-version `@ericdisero/aurora-shared` dependency pins in packages/mcp + packages/cli (they must match shared's new version), then `npm run publish:all` from the root (shared lands before mcp/cli). Token in `~/.npmrc` (see second-brain `business/operations/account-logins.md` — needs read-write + ALL-packages scope; a package-scoped granular token 404s on new packages). Scope note: published under `@ericdisero/*` because the `auroradaw` npm org doesn't exist (free-tier org creation is web-UI-only — Eric's call whether to create it and republish under `@auroradaw/*`). github.com/EricDisero/aurora-mcp is PUBLIC (created + published 2026-06-10) — the npm listing's repo link resolves and Smithery submission is unblocked.
 
 ## Skills
 

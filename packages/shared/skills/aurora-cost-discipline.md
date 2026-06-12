@@ -24,10 +24,10 @@ Two metered providers sit behind Aurora's cloud ops. Spend is real money. The ru
 | `aurora_add_vocals` / `aurora_add_instrumental` | not yet measured — same generation family; check the delta and report it |
 | `aurora_split` | MVSEP credits, priced by audio duration (separate balance); ALWAYS 3 MVSEP calls |
 | `aurora_extract` | MVSEP credits, VARIABLE by selection — the op's response includes the call plan; bundles count once however many of their stems you pick. Read the estimate before confirming a big catalog run |
-| `aurora_get_credits`, all local ffmpeg/stack/project ops | FREE |
+| `aurora_get_credits`, all local ffmpeg/project ops | FREE |
 
 ## Cheap-first ladder
 
 - Verifying a pipeline or experimenting? `aurora_sounds` first (2.5 credits), full `aurora_generate` only when the user wants a track.
 - Audition MP3s before paying for WAV upgrades; `aurora_fetch_wav` only the keepers.
-- Local ops (`aurora_pitch_shift`, `aurora_convert`, stack everything) cost nothing — prefer them over regenerating.
+- Local ops (`aurora_pitch_shift`, `aurora_convert`) cost nothing — prefer them over regenerating.

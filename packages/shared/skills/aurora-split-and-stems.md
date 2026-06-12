@@ -28,6 +28,6 @@ With `background: true`, `aurora_get_job_status` shows the per-job landing state
 
 ## On disk
 
-Stems live at `<project>/stems/<asset-slug>-<id6>/*.wav` — 32-bit float, sample-aligned by construction. They are DAW-ready files: stack them (`aurora_stack_add_lane` with `stemType`), pitch them (`aurora_pitch_shift`), rip MIDI from them (`aurora_rip_midi`), or point the user at the folder.
+Stems live at `<project>/stems/<asset-slug>-<id6>/*.wav` — 32-bit float, sample-aligned by construction. They are DAW-ready files: pitch them (`aurora_pitch_shift`), rip MIDI from them (`aurora_rip_midi`), drag them into the DAW, or point the user at the folder.
 
 Mastering against a reference (analyze → mix → export) happens in the Aurora app window from any split set — not agent-drivable yet.

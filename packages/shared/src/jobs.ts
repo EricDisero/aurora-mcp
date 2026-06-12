@@ -43,6 +43,8 @@ export interface JobManifest {
   createdAt: string
   updatedAt: string
   projectId: string
+  /** Track (project subfolder) the landed assets file into; null/absent = project root. */
+  trackId?: string | null
   /** Display-name base for landed assets. */
   baseName: string
   /** Original op params, for traceability. */
@@ -144,7 +146,7 @@ async function landGenerationAssets(
   variations: Array<{ id?: string; audioUrl?: string }>
 ): Promise<void> {
   const kind = m.kind === 'cover' ? 'cover' : 'generation'
-  const outputDir = await ensureKindDir(m.projectId, kind)
+  const outputDir = await ensureKindDir(m.projectId, kind, m.trackId)
 
   for (let i = 0; i < variations.length; i++) {
     const v = variations[i]
@@ -156,6 +158,7 @@ async function landGenerationAssets(
 
     const asset = insertAsset({
       projectId: m.projectId,
+      trackId: m.trackId ?? null,
       kind,
       name: sanitizeFileName(variantName),
       path: dest,

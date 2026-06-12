@@ -1,6 +1,6 @@
 # @ericdisero/aurora-cli
 
-`aurora` — terminal CLI for **Aurora**, the AI audio workbench. Drive music generation, covers, sample manufacturing, 7-stem separation, and stack export from your shell, or let Claude Code shell out to it instead of loading 27 MCP tool schemas into context.
+`aurora` — terminal CLI for **Aurora**, the AI audio workbench. Drive music generation, covers, sample manufacturing, and 7-stem separation from your shell, or let Claude Code shell out to it instead of loading 31 MCP tool schemas into context.
 
 ## Install
 
@@ -29,7 +29,6 @@ aurora run aurora_sounds --prompt "huge cinematic braam, dark low brass" --sound
 aurora run aurora_generate --prompt "dark synthwave, driving bass" --background
 aurora run aurora_get_job_status --jobId gen-xxxx        # streamUrls while cooking
 aurora run aurora_split --assetId <id> --background      # 7 stems, progressive landing
-aurora run aurora_stack_export --projectId <id>          # aligned multi-WAV bundle
 ```
 
 Server sibling: `@ericdisero/aurora-mcp-server`. Full docs: [github.com/EricDisero/aurora-mcp](https://github.com/EricDisero/aurora-mcp).

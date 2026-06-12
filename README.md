@@ -10,7 +10,7 @@ This monorepo publishes two installable packages, plus their shared core:
 
 ## What it does
 
-The MCP/CLI gives an AI agent full control of an Aurora music library: create projects, generate full tracks (Suno), transform existing audio into new styles (covers with the `audioWeight` dial), manufacture key/tempo-locked samples and one-shots, split ANY audio into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else via MVSEP + local phase cancellation), layer everything in the stack, and export sample-aligned multi-WAV bundles for any DAW. **27 tools.** Files on disk are the product — everything lands in real project folders the Aurora desktop app shows live.
+The MCP/CLI gives an AI agent full control of an Aurora music library: create projects, generate full tracks (Suno), transform existing audio into new styles (covers with the `audioWeight` dial), manufacture key/tempo-locked samples and one-shots, split ANY audio into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else via MVSEP + local phase cancellation). **31 tools.** Files on disk are the product — everything lands in real project folders the Aurora desktop app shows live.
 
 Standalone by design: the server works directly against Aurora's database and project folders. The desktop app does not need to be running (mastering — analyze/mix/export — stays in the app window for now).
 
@@ -60,11 +60,10 @@ Generation (1-3 min) and splits (3-5+ min) support `background: true` → poll `
 ~/.aurora/config.json          ← provider keys (or env vars; env wins)
 <userData>/aurora.db           ← Aurora's own SQLite library (WAL — app + agent coexist)
 <userData>/projects/<slug>/    ← generations/ covers/ imports/ references/ stems/ masters/
-                                  stack-export/ stack.json
 <userData>/agent-jobs/         ← background-job manifests
 
 @ericdisero/aurora-shared      ← operations/index.ts (single tool surface), storage,
-                                  Suno + MVSEP clients, jobs, split, stack, ffmpeg
+                                  Suno + MVSEP clients, jobs, split, ffmpeg
 @ericdisero/aurora-mcp-server  ← stdio server, registers operations as MCP tools
 @ericdisero/aurora-cli         ← commander entry: run / install-skills / keys / status / mcp
 ```

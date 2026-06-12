@@ -4,7 +4,7 @@
 // out transient writer locks.
 //
 // SCHEMA LOCKSTEP RULE: this file mirrors aurora/src/main/database/migrations.ts
-// at schema version 2. If the app migrates past v2, openDb() refuses to write
+// at schema version 3. If the app migrates past v3, openDb() refuses to write
 // with an "update your aurora-mcp packages" error instead of corrupting newer
 // schema assumptions.
 
@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { getDbPath, getUserDataDir } from './paths.js'
 
-const KNOWN_SCHEMA_VERSION = 2
+const KNOWN_SCHEMA_VERSION = 3
 
 let db: Database.Database | null = null
 
@@ -167,6 +167,32 @@ function runMigrations(database: Database.Database): void {
           ON extraction_stems(asset_id, stem_id);
       `)
       database.pragma('user_version = 2')
+    })()
+  }
+
+  // v3 — Tracks (project subfolders) + asset favorites, verbatim mirror of the
+  // app's v3 migration. track_id nullable (NULL = unfiled, flat at project root);
+  // favorite 0/1 default 0.
+  if ((database.pragma('user_version', { simple: true }) as number) < 3) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS tracks (
+          id          TEXT PRIMARY KEY,
+          project_id  TEXT NOT NULL,
+          name        TEXT NOT NULL,
+          dir_name    TEXT,
+          sort_order  INTEGER NOT NULL DEFAULT 0,
+          created_at  INTEGER NOT NULL,
+          updated_at  INTEGER NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_tracks_project ON tracks(project_id);
+
+        ALTER TABLE project_assets ADD COLUMN track_id TEXT;
+        ALTER TABLE project_assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_project_assets_track ON project_assets(track_id);
+      `)
+      database.pragma('user_version = 3')
     })()
   }
 }
