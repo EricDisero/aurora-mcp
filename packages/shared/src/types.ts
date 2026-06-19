@@ -25,7 +25,7 @@ export interface Track {
   updatedAt: number
 }
 
-export type AssetKind = 'generation' | 'cover' | 'import' | 'reference' | 'master'
+export type AssetKind = 'generation' | 'cover' | 'track' | 'master'
 
 export interface ProjectAsset {
   id: string

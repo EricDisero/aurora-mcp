@@ -8,14 +8,13 @@ import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '../db.js'
 import { getProjectDirectory, slugify, touchProject } from './projects.js'
 import { getTrackDirectory } from './tracks.js'
-import { addReference, deleteReference } from './references.js'
+import { deleteReference } from './references.js'
 import type { AssetKind, ProjectAsset } from '../types.js'
 
 const KIND_DIRS: Record<AssetKind, string> = {
   generation: 'generations',
   cover: 'covers',
-  import: 'imports',
-  reference: 'references',
+  track: 'tracks',
   master: 'masters'
 }
 
@@ -144,33 +143,32 @@ export function insertAsset(params: {
   return getAsset(id)!
 }
 
-/** Copy an external file into the project as an import or reference asset.
- *  References ALSO get a reference_tracks row (the global curve cache). */
+/** Copy an external file into the project as a neutral 'track' asset. The curve
+ *  cache (reference_tracks) is born lazily only when this track is later pointed
+ *  at as a match target — not at add time. */
 export async function addFileAsset(params: {
   projectId: string
   trackId?: string | null
-  kind: 'import' | 'reference'
   filePath: string
 }): Promise<ProjectAsset> {
-  const dir = await ensureKindDir(params.projectId, params.kind, params.trackId)
+  const dir = await ensureKindDir(params.projectId, 'track', params.trackId)
   const dest = uniqueDestPath(dir, basename(params.filePath))
   await copyFile(params.filePath, dest)
-
-  const name = basename(dest, extname(dest))
-  let refId: string | null = null
-  if (params.kind === 'reference') {
-    const ref = await addReference(dest, { copy: false })
-    refId = ref.id
-  }
 
   return insertAsset({
     projectId: params.projectId,
     trackId: params.trackId,
-    kind: params.kind,
-    name,
-    path: dest,
-    refId
+    kind: 'track',
+    name: basename(dest, extname(dest)),
+    path: dest
   })
+}
+
+/** Link an asset to a reference_tracks row (the curve cache the mastering flow
+ *  keys off). Mirrors the app's setAssetRefId. */
+export function setAssetRefId(id: string, refId: string): ProjectAsset {
+  getDb().prepare('UPDATE project_assets SET ref_id = ? WHERE id = ?').run(refId, id)
+  return getAsset(id)!
 }
 
 /** Point an asset at a new file (e.g. after a WAV fetch upgrades the MP3). */

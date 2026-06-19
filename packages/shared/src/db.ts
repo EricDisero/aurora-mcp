@@ -4,7 +4,7 @@
 // out transient writer locks.
 //
 // SCHEMA LOCKSTEP RULE: this file mirrors aurora/src/main/database/migrations.ts
-// at schema version 3. If the app migrates past v3, openDb() refuses to write
+// at schema version 5. If the app migrates past v5, openDb() refuses to write
 // with an "update your aurora-mcp packages" error instead of corrupting newer
 // schema assumptions.
 
@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { getDbPath, getUserDataDir } from './paths.js'
 
-const KNOWN_SCHEMA_VERSION = 3
+const KNOWN_SCHEMA_VERSION = 5
 
 let db: Database.Database | null = null
 
@@ -66,7 +66,7 @@ function runMigrations(database: Database.Database): void {
       project_id  TEXT NOT NULL,
       stem_type   TEXT NOT NULL CHECK(stem_type IN ('vocals','kick','snare','toms','hats','bass','ee')),
       path        TEXT NOT NULL,
-      origin      TEXT NOT NULL CHECK(origin IN ('mvsep','synthesized')),
+      origin      TEXT NOT NULL CHECK(origin IN ('mvsep','synthesized','imported')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
@@ -193,6 +193,69 @@ function runMigrations(database: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_project_assets_track ON project_assets(track_id);
       `)
       database.pragma('user_version = 3')
+    })()
+  }
+
+  // v4 — Bring-your-own-stems: project_stems.origin gains 'imported'. Verbatim
+  // mirror of the app's v4 (table rebuild — SQLite can't ALTER a CHECK).
+  if ((database.pragma('user_version', { simple: true }) as number) < 4) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE project_stems_v4 (
+          id          TEXT PRIMARY KEY,
+          project_id  TEXT NOT NULL,
+          asset_id    TEXT,
+          stem_type   TEXT NOT NULL CHECK(stem_type IN ('vocals','kick','snare','toms','hats','bass','ee')),
+          path        TEXT NOT NULL,
+          origin      TEXT NOT NULL CHECK(origin IN ('mvsep','synthesized','imported')),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        INSERT INTO project_stems_v4 (id, project_id, asset_id, stem_type, path, origin)
+          SELECT id, project_id, asset_id, stem_type, path, origin FROM project_stems;
+        DROP TABLE project_stems;
+        ALTER TABLE project_stems_v4 RENAME TO project_stems;
+        CREATE INDEX IF NOT EXISTS idx_project_stems_project ON project_stems(project_id);
+        CREATE INDEX IF NOT EXISTS idx_project_stems_asset ON project_stems(asset_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_project_stems_asset_unique
+          ON project_stems(asset_id, stem_type);
+      `)
+      database.pragma('user_version = 4')
+    })()
+  }
+
+  // v5 — Kind collapse: import + reference merge into one neutral 'track' kind.
+  // Verbatim mirror of the app's v5 (table rebuild — SQLite can't ALTER a CHECK).
+  // project_assets CHECK becomes generation|cover|track|master; existing
+  // import/reference rows data-migrate to 'track'. Files left where they are.
+  if ((database.pragma('user_version', { simple: true }) as number) < 5) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE project_assets_v5 (
+          id               TEXT PRIMARY KEY,
+          project_id       TEXT NOT NULL,
+          kind             TEXT NOT NULL CHECK(kind IN ('generation','cover','track','master')),
+          name             TEXT NOT NULL,
+          path             TEXT NOT NULL,
+          origin           TEXT,
+          source_asset_id  TEXT,
+          ref_id           TEXT,
+          track_id         TEXT,
+          favorite         INTEGER NOT NULL DEFAULT 0,
+          created_at       INTEGER NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        INSERT INTO project_assets_v5
+          (id, project_id, kind, name, path, origin, source_asset_id, ref_id, track_id, favorite, created_at)
+          SELECT id, project_id,
+                 CASE WHEN kind IN ('import','reference') THEN 'track' ELSE kind END,
+                 name, path, origin, source_asset_id, ref_id, track_id, favorite, created_at
+            FROM project_assets;
+        DROP TABLE project_assets;
+        ALTER TABLE project_assets_v5 RENAME TO project_assets;
+        CREATE INDEX IF NOT EXISTS idx_project_assets_project ON project_assets(project_id);
+        CREATE INDEX IF NOT EXISTS idx_project_assets_track ON project_assets(track_id);
+      `)
+      database.pragma('user_version = 5')
     })()
   }
 }

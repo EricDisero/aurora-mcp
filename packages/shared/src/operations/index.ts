@@ -42,9 +42,11 @@ import {
   insertAsset,
   listAssets,
   setAssetFavorite,
+  setAssetRefId,
   setAssetTrack,
   updateAssetPath
 } from '../storage/assets.js'
+import { addReference } from '../storage/references.js'
 import {
   createTrack,
   deleteTrack,
@@ -442,11 +444,11 @@ const favoriteAssetOp: Operation<{ assetId: string; favorite: boolean }> = {
 const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
   id: 'aurora_import_file',
   description:
-    "Copy an external audio file into a project as an 'import' asset (lands in <project>/imports/, " +
-    "or the track's imports/ if trackId is given). Any asset can then be split, covered, or pitch-shifted.",
+    "Copy an external audio file into a project as a 'track' asset (lands in <project>/tracks/, " +
+    "or the track's tracks/ if trackId is given). Any asset can then be split, covered, or pitch-shifted.",
   input: z.object({
     projectId: z.string(),
-    trackId: z.string().optional().describe('File the import into this track subfolder'),
+    trackId: z.string().optional().describe('File the track into this track subfolder'),
     filePath: z.string().describe('Absolute path to the audio file to import')
   }),
   async run(input) {
@@ -454,7 +456,6 @@ const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: s
     const asset = await addFileAsset({
       projectId: input.projectId,
       trackId: input.trackId ?? null,
-      kind: 'import',
       filePath: input.filePath
     })
     return ok({ asset })
@@ -464,11 +465,12 @@ const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: s
 const addReferenceOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
   id: 'aurora_add_reference',
   description:
-    "Copy an audio file into a project as a 'reference' asset (lands in <project>/references/ and " +
-    "registers in the global reference library the mastering flow keys off). References can be split too.",
+    "Copy an audio file into a project as a 'track' asset AND register it in the global reference " +
+    'library (the curve cache the mastering flow keys off), so it can be reused as a match target ' +
+    'across projects. The opt-in "save as reusable reference" path — a plain import is aurora_import_file.',
   input: z.object({
     projectId: z.string(),
-    trackId: z.string().optional().describe('File the reference into this track subfolder'),
+    trackId: z.string().optional().describe('File the track into this track subfolder'),
     filePath: z.string().describe('Absolute path to the reference audio file')
   }),
   async run(input) {
@@ -476,10 +478,12 @@ const addReferenceOp: Operation<{ projectId: string; trackId?: string; filePath:
     const asset = await addFileAsset({
       projectId: input.projectId,
       trackId: input.trackId ?? null,
-      kind: 'reference',
       filePath: input.filePath
     })
-    return ok({ asset })
+    // Opt-in reusable-reference: stamp the curve-cache row on the new track.
+    const ref = await addReference(asset.path, { copy: false })
+    const linked = setAssetRefId(asset.id, ref.id)
+    return ok({ asset: linked })
   }
 }
 
@@ -1408,7 +1412,7 @@ const pitchShiftOp: Operation<{
     if (asset) {
       newAsset = insertAsset({
         projectId: asset.projectId,
-        kind: 'import',
+        kind: 'track',
         name: basename(outPath, extname(outPath)),
         path: outPath,
         origin: { tool: 'pitch_shift', semitones: input.semitones, engine, sourceAssetId: asset.id },
@@ -1423,7 +1427,7 @@ const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' 
   id: 'aurora_convert',
   description:
     'Convert an asset or audio file to WAV (44.1kHz stereo float32) or MP3 (320k CBR) via local ffmpeg ' +
-    '(FREE). If the input was a project asset, the result registers as a new import asset.',
+    '(FREE). If the input was a project asset, the result registers as a new track asset.',
   input: z.object({
     assetId: z.string().optional(),
     path: z.string().optional(),
@@ -1442,7 +1446,7 @@ const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' 
     if (asset) {
       newAsset = insertAsset({
         projectId: asset.projectId,
-        kind: 'import',
+        kind: 'track',
         name: basename(outPath, extname(outPath)),
         path: outPath,
         origin: { tool: 'convert', to: input.to, sourceAssetId: asset.id },
