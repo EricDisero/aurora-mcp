@@ -12,6 +12,7 @@ import { getJobsDir } from './paths.js'
 import {
   downloadTo,
   fetchGenerationRecord,
+  generationFailureDetail,
   isGenerationFailure
 } from './providers/suno.js'
 import { fetchSeparationStatus, resolveSeparationStatus } from './providers/mvsep.js'
@@ -253,7 +254,9 @@ async function advanceGeneration(m: JobManifest): Promise<void> {
   }
 
   if (isGenerationFailure(record.status)) {
-    throw new Error(`Generation failed with status: ${record.status}`)
+    throw new Error(
+      `Generation failed (${record.status}): ${generationFailureDetail(record)}`
+    )
   }
 
   m.stage =

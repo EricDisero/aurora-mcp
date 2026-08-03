@@ -36,6 +36,9 @@ aurora-mcp/
 - **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` at v3 (v2 = `extraction_stems`; v3 = `tracks` + `project_assets.track_id`/`favorite`, 2026-06-12) and REFUSES to open a newer-versioned DB. If the app gains a v4 migration, port it here in the same session and bump `KNOWN_SCHEMA_VERSION`.
 - **Storage-semantics lockstep.** `storage/*.ts` and `split.ts` are ports of the app's modules (see the contract table below) — behavior changes go into BOTH codebases or neither.
 - **Provider URLs expire server-side.** Always download-and-persist; `streamUrls` are preview-only, never stored as asset paths.
+- **NEVER throw a provider failure as status-only.** Every distinct cause reports the same `GENERATE_AUDIO_FAILED`, so a status-only error is indistinguishable from every other failure and forces blind guessing. `record-info` returns `errorCode` + `errorMessage`; parse and surface them at EVERY throw site (`generationFailureDetail()` in `providers/suno.ts`; app mirror in `suno-client.ts`). Fixed 2026-07-31 after three failed covers were debugged by hand-querying the API — the answer was in the response the whole time.
+- **Cover-of-a-Suno-track does not work by re-upload.** `upload-cover` rejects Suno's own output: `errorCode 413` "This audio matches an existing recording in our catalog." Use the `taskId`/`audioId` endpoints (`extend-music`, `cover-suno`) — unwired today, and the top candidates for the next op. Full findings + scope caveats: `docs/suno-param-surface.md`.
+- **Re-verify the param surface against live docs before declaring a param absent** — `docs/suno-param-surface.md` silently went stale for 7 weeks (missed `duration`, 10–360s, needs `customMode:true` + `model:V5_5`).
 - **Destructive ops require `confirm: true`** (delete_asset, delete_project). Splits refuse to re-spend when 7 stems exist.
 - **NEVER commit.** Eric commits at his checkpoints.
 
@@ -74,6 +77,8 @@ npm run typecheck
 node scripts/smoke-mcp.mjs            # stdio protocol smoke (free)
 node packages/cli/dist/index.js status
 ```
+
+**Invocation form is `aurora run <op> --key value`** — there is NO `aurora op <op>` subcommand (`error: unknown command 'op'`), and `--help` on a `run` line prints the *generic* run help, never the op's schema. To see an op's real params, read its zod `input` block in `packages/shared/src/operations/index.ts` — that file is the only param reference. Booleans pass as `--instrumental true`; `negativeTags` is ONE comma-separated string.
 
 Test against an isolated library: set `AURORA_USER_DATA=%TEMP%\aurora-mcp-test` (never the real userData for write-heavy tests).
 

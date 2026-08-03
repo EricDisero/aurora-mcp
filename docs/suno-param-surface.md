@@ -1,5 +1,7 @@
 # Suno Provider Param Surface (sunoapi.org primary / kie.ai fallback)
 
+> **Staleness warning (2026-07-31):** this doc drifted — sunoapi.org shipped a `duration` param that the 2026-06-10 sweep predates, and it was trusted as complete for seven weeks. **Re-verify against live docs before telling anyone a param doesn't exist.** The endpoints listed at the bottom as "not exposed" may also have moved.
+
 Enumerated from live docs.sunoapi.org 2026-06-10 (llms.txt index + per-endpoint pages). This table is THE CONTRACT for `aurora_generate` / `aurora_cover` / `aurora_sounds` / `aurora_add_vocals` / `aurora_add_instrumental` op schemas AND the app's Generate page: no param left unexposed, no param invented. kie.ai mirrors the same `/api/v1/*` shapes.
 
 Rule (locked 2026-06-10): **op schemas expose the full wire surface with sane defaults — curation is the app's job, never the MCP's.**
@@ -36,6 +38,7 @@ Rule (locked 2026-06-10): **op schemas expose the full wire surface with sane de
 | `weirdnessConstraint` | number | 0.00–1.00 | creative deviation/novelty |
 | `audioWeight` | number | 0.00–1.00 | input-audio influence (audio-conditioned ops) |
 | `callBackUrl` | URI | — | required by generate/upload-cover at the wire; Aurora polls instead (placeholder fallback pattern in the clients) |
+| `duration` | integer | 10–360 (sec) | **Target output length. ONLY effective when `customMode: true` AND `model: V5_5` — silently ignored otherwise.** Added by sunoapi.org after this doc's 2026-06-10 sweep; found 2026-07-31. NOT yet exposed on any op — wiring it means pinning `V5_5` explicitly, since the op default model is not guaranteed to be V5_5. |
 
 **Persona (generate + upload-cover, custom mode only):**
 | Param | Type | Notes |
@@ -54,6 +57,21 @@ Poll: `/api/v1/generate/record-info?taskId=` — statuses PENDING / TEXT_SUCCESS
 ## POST /api/v1/generate/upload-cover (aurora_cover)
 
 Same surface as generate PLUS `uploadUrl` (required; hosted file from the File Upload API; max 8 min audio, V4_5ALL capped at 1 min). Same matrix, knobs, persona, poll.
+
+### ⚠️ You CANNOT upload-cover Suno's own output (verified 2026-07-31)
+
+Uploading audio Suno generated fails with `GENERATE_AUDIO_FAILED` + `errorCode 413`, `errorMessage: "This audio matches an existing recording in our catalog."` This is the endpoint's upload-side copyright/dedup guard — its purpose is blocking covers of catalogued commercial recordings, and Suno's own generations are in that catalog, so a cover-of-a-cover trips it.
+
+**Scope — do not over-read this.** It is a catalog match against Suno's records, NOT a general "is this audio AI-generated" classifier. Passing it implies NOTHING about whether any independent/downstream AI-provenance detector would flag the audio; those are unrelated systems. Do not treat this check as a provenance oracle.
+
+Observed behavior on the guard (one session, n=1 each — not a characterization):
+- Raw trim of a Suno cover (48k AND resampled 44.1k, 20s) → matched.
+- `varispeed` pitch shift −1st (pure resample, pitch+tempo both move) → still matched.
+- `asetrate+atempo` pitch shift −1st (`preserveTempo: true`; resample THEN time-stretch back) → passed.
+
+The discriminator appears to be the time-stretch stage genuinely reconstructing the signal, not the magnitude of pitch/tempo change — varispeed altered more and still matched. **The supported path for iterating on a Suno track is the `taskId`/`audioId` endpoints (`extend-music`, `cover-suno`), which upload nothing and so never reach this guard.** Prefer those; see the unexposed-endpoints section.
+
+Length note (n=1): a 20s source produced a 119.8s cover in a style where full-length sources were yielding 64–75s. Source length ≠ output length, and short sources are not inherently penalized.
 
 ## POST /api/v1/generate/sounds (aurora_sounds)
 

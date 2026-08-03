@@ -116,32 +116,43 @@ function applySharedKnobs(
   }
 }
 
-/** Submit a generation task. Returns the provider taskId. */
+/** Submit a generation task. Returns the provider taskId. The provider rejects a
+ *  create that omits callBackUrl ("Please enter callBackUrl"); Aurora polls instead,
+ *  so retry once with the placeholder (mirrors createCover/add-vocals/add-instrumental). */
 export async function createGeneration(params: GenerationParams): Promise<string> {
-  const body: Record<string, unknown> = {
-    prompt: params.prompt,
-    customMode: params.customMode,
-    instrumental: params.instrumental,
-    model: params.model
-  }
-  if (params.style) body.style = params.style
-  if (params.title) body.title = params.title
-  applySharedKnobs(body, params)
+  const attempt = async (withCallback: boolean): Promise<string> => {
+    const body: Record<string, unknown> = {
+      prompt: params.prompt,
+      customMode: params.customMode,
+      instrumental: params.instrumental,
+      model: params.model
+    }
+    if (params.style) body.style = params.style
+    if (params.title) body.title = params.title
+    applySharedKnobs(body, params)
+    if (withCallback) body.callBackUrl = CALLBACK_PLACEHOLDER
 
-  const res = await fetch(api('/api/v1/generate'), {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(body)
-  })
-  const json = (await res.json()) as { code?: number; msg?: string; data?: { taskId?: string } }
+    const res = await fetch(api('/api/v1/generate'), {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body)
+    })
+    const json = (await res.json()) as { code?: number; msg?: string; data?: { taskId?: string } }
 
-  const taskId = json.data?.taskId
-  if (!res.ok || !taskId) {
-    throw new Error(
-      `${host()} generate failed (HTTP ${res.status}): ${json.msg || 'no taskId returned'}`
-    )
+    const taskId = json.data?.taskId
+    if (!res.ok || (json.code !== undefined && json.code !== 200) || !taskId) {
+      throw new Error(
+        `${host()} generate failed (HTTP ${res.status}, code ${json.code ?? 'n/a'}): ${json.msg || 'no taskId returned'}`
+      )
+    }
+    return taskId
   }
-  return taskId
+
+  try {
+    return await attempt(false)
+  } catch {
+    return attempt(true)
+  }
 }
 
 // ── Sounds generation (samples / one-shots / loops; sunoapi.org only) ──
@@ -460,6 +471,20 @@ export interface GenerationRecord {
    *  CALLBACK_EXCEPTION / SENSITIVE_WORD_ERROR */
   status: string
   variations: PolledVariation[]
+  /** The provider's REASON for a failure — the status alone is useless for
+   *  diagnosis (every distinct cause reports GENERATE_AUDIO_FAILED). e.g.
+   *  errorCode 413 "This audio matches an existing recording in our catalog."
+   *  = Suno refusing to cover its own output. Carry it to every throw site. */
+  errorCode?: number | string | null
+  errorMessage?: string | null
+}
+
+/** Uniform failure text: status is the WHAT, errorMessage the WHY. */
+export function generationFailureDetail(r: {
+  errorCode?: number | string | null
+  errorMessage?: string | null
+}): string {
+  return String(r.errorMessage || r.errorCode || 'no detail')
 }
 
 /** ONE record-info fetch (no waiting). The background-job model's poll unit. */
@@ -472,6 +497,8 @@ export async function fetchGenerationRecord(taskId: string): Promise<GenerationR
     code?: number
     data?: {
       status?: string
+      errorCode?: number | string | null
+      errorMessage?: string | null
       response?: {
         sunoData?: Array<{
           id?: string
@@ -491,7 +518,12 @@ export async function fetchGenerationRecord(taskId: string): Promise<GenerationR
     title: s.title,
     duration: s.duration
   }))
-  return { status, variations }
+  return {
+    status,
+    variations,
+    errorCode: info.data?.errorCode ?? null,
+    errorMessage: info.data?.errorMessage ?? null
+  }
 }
 
 export function isGenerationFailure(status: string): boolean {
@@ -532,7 +564,9 @@ export async function pollGenerationTask(
     }
 
     if (isGenerationFailure(record.status)) {
-      throw new Error(`${host()} generation failed with status: ${record.status}`)
+      throw new Error(
+        `${host()} generation failed (${record.status}): ${generationFailureDetail(record)}`
+      )
     }
   }
 
