@@ -4,3 +4,16 @@ dist-mcpb/
 *.tsbuildinfo
 packages/shared/src/skills/content.ts
 .env
+
+# --- Secrets: never commit (standard block) ---
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.p12
+*.pfx
+credentials.json
+client_secret*.json
+service-account*.json
+token*.json
