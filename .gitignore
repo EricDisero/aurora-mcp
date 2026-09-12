@@ -17,3 +17,8 @@ credentials.json
 client_secret*.json
 service-account*.json
 token*.json
+
+# Codex: machine-local. Codex imports .claude/settings.json hooks into .codex/ on
+# first open; the blank .codex/hooks.json stops that. The real Codex hook is the
+# global adapter (second-brain/rules/agent-runtime.md).
+/.codex/
