@@ -87,9 +87,33 @@ export interface GenerationParams {
   audioWeight?: number
   /** Persona id (Generate Persona) or a Suno Voice voiceId. Custom mode only. */
   personaId?: string
-  /** 'style_persona' (default) | 'voice_persona' (voiceId on V5/V5_5). */
+  /** 'style_persona' (default) | 'voice_persona' (voiceId on V5_5 / V6 family). */
   personaModel?: 'style_persona' | 'voice_persona'
+  /** Target length in seconds, 10-360. Honoured ONLY with customMode:true on
+   *  V5_5 / V6 / V6_WILD / V6_MINI; silently ignored elsewhere. */
+  duration?: number
 }
+
+/** Wire model ids (docs.sunoapi.org, verified 2026-09-14). V6 family is
+ *  current; everything older is "deprecated, backward compatibility only" on
+ *  sunoapi.org and "Discontinued" on kie.ai. */
+export const SUNO_MODELS = [
+  'V6',
+  'V6_WILD',
+  'V6_MINI',
+  'V5_5',
+  'V5',
+  'V4_5PLUS',
+  'V4_5ALL',
+  'V4_5',
+  'V4'
+] as const
+export const DEFAULT_SUNO_MODEL = 'V6'
+/** Models that honour the `duration` param (custom mode only). */
+export const DURATION_MODELS = new Set(['V5_5', 'V6', 'V6_WILD', 'V6_MINI'])
+/** Dots → underscores (V5.5 → V5_5, V6.mini → V6_MINI), upper-cased. */
+export const normalizeModel = (m: string | undefined, fallback = DEFAULT_SUNO_MODEL): string =>
+  (m ?? fallback).replace(/[.-]/g, '_').toUpperCase()
 
 /** Append the shared optional knobs (full wire surface, param-table contract:
  *  docs/suno-param-surface.md) onto a create body. */
@@ -103,8 +127,10 @@ function applySharedKnobs(
     audioWeight?: number
     personaId?: string
     personaModel?: 'style_persona' | 'voice_persona'
+    duration?: number
   }
 ): void {
+  if (p.duration !== undefined) body.duration = p.duration
   if (p.vocalGender) body.vocalGender = wireVocalGender(p.vocalGender)
   if (p.negativeTags) body.negativeTags = p.negativeTags
   if (p.styleWeight !== undefined) body.styleWeight = p.styleWeight
@@ -167,12 +193,14 @@ export interface SoundsParams {
   soundLoop?: boolean
   /** Capture lyric subtitles alongside the audio. */
   grabLyrics?: boolean
+  /** Any SUNO_MODELS id; docs default V6 (the V5-only lock ended with v6). */
+  model?: string
 }
 
 /** Submit a Sounds Generation task. sunoapi.org ONLY — kie.ai does not expose
- *  the endpoint. Model locked to V5 by the docs. */
+ *  the endpoint. */
 export async function createSoundsGeneration(params: SoundsParams): Promise<string> {
-  const body: Record<string, unknown> = { prompt: params.prompt, model: 'V5' }
+  const body: Record<string, unknown> = { prompt: params.prompt, model: normalizeModel(params.model) }
   if (params.soundKey) body.soundKey = params.soundKey
   if (params.soundTempo !== undefined) body.soundTempo = params.soundTempo
   if (params.soundLoop) body.soundLoop = true
@@ -280,6 +308,8 @@ export interface CoverParams {
   weirdnessConstraint?: number
   personaId?: string
   personaModel?: 'style_persona' | 'voice_persona'
+  /** 10-360 s; custom mode + V5_5/V6 family only. */
+  duration?: number
 }
 
 /** Submit an upload-and-cover (style transform) task. Poll the returned taskId
@@ -346,7 +376,7 @@ export interface AddVocalsParams {
   styleWeight?: number
   weirdnessConstraint?: number
   audioWeight?: number
-  /** V4_5PLUS (default) | V5 | V5_5 — this endpoint supports only these three. */
+  /** Any SUNO_MODELS id; docs default V6. */
   model?: string
 }
 
@@ -360,7 +390,7 @@ export async function createAddVocals(params: AddVocalsParams): Promise<string> 
       style: params.style,
       title: params.title,
       negativeTags: params.negativeTags,
-      model: params.model ?? 'V4_5PLUS'
+      model: normalizeModel(params.model)
     }
     applySharedKnobs(body, { ...params, negativeTags: undefined })
     if (withCallback) body.callBackUrl = CALLBACK_PLACEHOLDER
@@ -407,7 +437,7 @@ export interface AddInstrumentalParams {
   styleWeight?: number
   weirdnessConstraint?: number
   audioWeight?: number
-  /** V4_5PLUS (default) | V5 | V5_5. */
+  /** Any SUNO_MODELS id; docs default V6. */
   model?: string
 }
 
@@ -420,7 +450,7 @@ export async function createAddInstrumental(params: AddInstrumentalParams): Prom
       title: params.title,
       tags: params.tags,
       negativeTags: params.negativeTags,
-      model: params.model ?? 'V4_5PLUS'
+      model: normalizeModel(params.model)
     }
     applySharedKnobs(body, { ...params, negativeTags: undefined })
     if (withCallback) body.callBackUrl = CALLBACK_PLACEHOLDER
@@ -451,6 +481,203 @@ export async function createAddInstrumental(params: AddInstrumentalParams): Prom
   } catch {
     return attempt(true)
   }
+}
+
+// ── v6-era endpoints: extend / upload-extend / replace-section / mashup ──
+// Wire shapes verified against docs.sunoapi.org 2026-09-14. All poll the same
+// record-info endpoint as generate. Shared submit helper below.
+
+async function submitTask(path: string, label: string, base: Record<string, unknown>): Promise<string> {
+  const attempt = async (withCallback: boolean): Promise<string> => {
+    const body = { ...base }
+    if (withCallback) body.callBackUrl = CALLBACK_PLACEHOLDER
+    const res = await fetch(api(path), {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body)
+    })
+    const json = (await res.json()) as {
+      code?: number
+      msg?: string
+      data?: { taskId?: string; task_id?: string }
+    }
+    const taskId = json.data?.taskId ?? json.data?.task_id
+    if (!res.ok || (json.code !== undefined && json.code !== 200) || !taskId) {
+      throw new Error(
+        `${host()} ${label} failed (HTTP ${res.status}, code ${json.code ?? 'n/a'}): ${
+          json.msg || 'no taskId returned'
+        }`
+      )
+    }
+    return taskId
+  }
+  try {
+    return await attempt(false)
+  } catch {
+    return attempt(true)
+  }
+}
+
+export interface ExtendParams {
+  /** Provider ids of the Suno track to continue (from the asset's origin). */
+  audioId: string
+  taskId?: string
+  /** true = custom params below steer the continuation; false = provider reuses
+   *  the original track's params (prompt/style/title/continueAt ignored). */
+  defaultParamFlag: boolean
+  model?: string
+  instrumental?: boolean
+  prompt?: string
+  style?: string
+  title?: string
+  /** Seconds into the source where the continuation starts (custom mode). */
+  continueAt?: number
+  vocalGender?: 'male' | 'female'
+  negativeTags?: string
+  styleWeight?: number
+  weirdnessConstraint?: number
+  audioWeight?: number
+  personaId?: string
+  personaModel?: 'style_persona' | 'voice_persona'
+}
+
+/** POST /api/v1/generate/extend — continue a Suno-generated track by its
+ *  audioId. Uploads nothing, so it never trips the catalog-match guard that
+ *  blocks re-uploading Suno output. */
+export async function createExtend(params: ExtendParams): Promise<string> {
+  const body: Record<string, unknown> = {
+    audioId: params.audioId,
+    defaultParamFlag: params.defaultParamFlag,
+    model: normalizeModel(params.model),
+    instrumental: params.instrumental ?? false
+  }
+  if (params.taskId) body.taskId = params.taskId
+  if (params.defaultParamFlag) {
+    if (params.prompt) body.prompt = params.prompt
+    if (params.style) body.style = params.style
+    if (params.title) body.title = params.title
+    if (params.continueAt !== undefined) body.continueAt = params.continueAt
+  }
+  applySharedKnobs(body, params)
+  return submitTask('/api/v1/generate/extend', 'extend', body)
+}
+
+export interface UploadExtendParams {
+  /** Hosted URL from uploadAudioFile (max 8 min). */
+  uploadUrl: string
+  defaultParamFlag: boolean
+  model?: string
+  instrumental?: boolean
+  prompt?: string
+  style?: string
+  title?: string
+  /** Seconds; >0 and < source duration. */
+  continueAt?: number
+  vocalGender?: 'male' | 'female'
+  negativeTags?: string
+  styleWeight?: number
+  weirdnessConstraint?: number
+  audioWeight?: number
+  personaId?: string
+  personaModel?: 'style_persona' | 'voice_persona'
+}
+
+/** POST /api/v1/generate/upload-extend — continue an UPLOADED file. Same
+ *  upload-side catalog guard as upload-cover (Suno's own output is rejected). */
+export async function createUploadExtend(params: UploadExtendParams): Promise<string> {
+  const body: Record<string, unknown> = {
+    uploadUrl: params.uploadUrl,
+    defaultParamFlag: params.defaultParamFlag,
+    model: normalizeModel(params.model),
+    instrumental: params.instrumental ?? false
+  }
+  if (params.prompt) body.prompt = params.prompt
+  if (params.style) body.style = params.style
+  if (params.title) body.title = params.title
+  if (params.continueAt !== undefined) body.continueAt = params.continueAt
+  applySharedKnobs(body, params)
+  return submitTask('/api/v1/generate/upload-extend', 'upload-extend', body)
+}
+
+export interface ReplaceSectionParams {
+  /** Mode 1: an existing Suno track (both ids). */
+  taskId?: string
+  audioId?: string
+  /** Mode 2: an uploaded file (+ model). */
+  uploadUrl?: string
+  model?: string
+  /** Lyrics for the replaced window. */
+  prompt: string
+  /** Style tags (this endpoint names the field `tags`). */
+  tags: string
+  title: string
+  /** Window in seconds, 2 decimals, at least 10 s wide. */
+  infillStartS: number
+  infillEndS: number
+  /** The complete lyrics of the song AFTER the edit. */
+  fullLyrics: string
+  negativeTags?: string
+}
+
+/** POST /api/v1/generate/replace-section — v6 section editing (infill a
+ *  10 s+ window, everything outside it preserved). */
+export async function createReplaceSection(params: ReplaceSectionParams): Promise<string> {
+  if (params.infillEndS - params.infillStartS < 10) {
+    throw new Error('replace-section: the infill window must be at least 10 seconds wide')
+  }
+  const body: Record<string, unknown> = {
+    prompt: params.prompt,
+    tags: params.tags,
+    title: params.title,
+    infillStartS: Number(params.infillStartS.toFixed(2)),
+    infillEndS: Number(params.infillEndS.toFixed(2)),
+    fullLyrics: params.fullLyrics
+  }
+  if (params.uploadUrl) {
+    body.uploadUrl = params.uploadUrl
+    body.model = normalizeModel(params.model)
+  } else if (params.taskId && params.audioId) {
+    body.taskId = params.taskId
+    body.audioId = params.audioId
+  } else {
+    throw new Error('replace-section needs either uploadUrl or BOTH taskId and audioId')
+  }
+  if (params.negativeTags) body.negativeTags = params.negativeTags
+  return submitTask('/api/v1/generate/replace-section', 'replace-section', body)
+}
+
+export interface MashupParams {
+  /** Exactly two hosted URLs from uploadAudioFile. */
+  uploadUrlList: [string, string]
+  customMode: boolean
+  model?: string
+  prompt?: string
+  style?: string
+  /** ≤80 chars on this endpoint. */
+  title?: string
+  instrumental?: boolean
+  vocalGender?: 'male' | 'female'
+  styleWeight?: number
+  weirdnessConstraint?: number
+  audioWeight?: number
+  /** 10-360 s, V6 family only. */
+  duration?: number
+}
+
+/** POST /api/v1/generate/mashup — v6 multi-source composition from two
+ *  uploads. Same upload-side catalog guard as upload-cover. */
+export async function createMashup(params: MashupParams): Promise<string> {
+  const body: Record<string, unknown> = {
+    uploadUrlList: params.uploadUrlList,
+    customMode: params.customMode,
+    model: normalizeModel(params.model),
+    instrumental: params.instrumental ?? false
+  }
+  if (params.prompt) body.prompt = params.prompt
+  if (params.style) body.style = params.style
+  if (params.title) body.title = params.title
+  applySharedKnobs(body, params)
+  return submitTask('/api/v1/generate/mashup', 'mashup', body)
 }
 
 // ── Record polling (shared by generate / sounds / cover) ────────

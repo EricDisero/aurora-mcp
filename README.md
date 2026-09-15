@@ -10,7 +10,7 @@ This monorepo publishes two installable packages, plus their shared core:
 
 ## What it does
 
-The MCP/CLI gives an AI agent full control of an Aurora music library: create projects, generate full tracks (Suno), transform existing audio into new styles (covers with the `audioWeight` dial), manufacture key/tempo-locked samples and one-shots, split ANY audio into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else via MVSEP + local phase cancellation). **31 tools.** Files on disk are the product — everything lands in real project folders the Aurora desktop app shows live.
+The MCP/CLI gives an AI agent full control of an Aurora music library: create projects, generate full tracks (Suno), transform existing audio into new styles (covers with the `audioWeight` dial), manufacture key/tempo-locked samples and one-shots, split ANY audio into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else via MVSEP + local phase cancellation). **34 tools.** Files on disk are the product — everything lands in real project folders the Aurora desktop app shows live.
 
 Standalone by design: the server works directly against Aurora's database and project folders. The desktop app does not need to be running (mastering — analyze/mix/export — stays in the app window for now).
 

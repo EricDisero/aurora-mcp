@@ -1,6 +1,6 @@
 # @ericdisero/aurora-cli
 
-`aurora` — terminal CLI for **Aurora**, the AI audio workbench. Drive music generation, covers, sample manufacturing, and 7-stem separation from your shell, or let Claude Code shell out to it instead of loading 31 MCP tool schemas into context.
+`aurora` — terminal CLI for **Aurora**, the AI audio workbench. Drive music generation, covers, sample manufacturing, and 7-stem separation from your shell, or let Claude Code shell out to it instead of loading 34 MCP tool schemas into context.
 
 ## Install
 

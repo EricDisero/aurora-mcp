@@ -17,13 +17,21 @@ import {
   createAddInstrumental,
   createAddVocals,
   createCover,
+  createExtend,
   createGeneration,
+  createMashup,
+  createReplaceSection,
   createSoundsGeneration,
+  createUploadExtend,
   createWavConversion,
+  DEFAULT_SUNO_MODEL,
+  DURATION_MODELS,
   downloadTo,
   getRemainingCredits,
   host,
+  normalizeModel,
   pollWavConversion,
+  SUNO_MODELS,
   uploadAudioFile
 } from '../providers/suno.js'
 import { getMvsepUserInfo } from '../providers/mvsep.js'
@@ -85,10 +93,32 @@ function ok(data: unknown, text?: string): OperationResult {
   return { text: text ?? JSON.stringify(data, null, 2), data }
 }
 
-// Latest Suno model (wire enum verified vs the sunoapi.org OpenAPI spec
-// 2026-06-10: V4 | V4_5 | V4_5PLUS | V4_5ALL | V5 | V5_5). Sounds stays
-// locked to V5 by its own docs.
-const DEFAULT_GEN_MODEL = 'V5_5'
+// Suno model surface (docs.sunoapi.org, re-verified 2026-09-14 after the v6
+// launch): V6 | V6_WILD | V6_MINI are current on EVERY endpoint, sounds
+// included; V5_5 and older are deprecated (still accepted on sunoapi.org,
+// "Discontinued" on kie.ai). Enum + default live in providers/suno.ts.
+const DEFAULT_GEN_MODEL = DEFAULT_SUNO_MODEL
+const MODEL_DESCRIBE =
+  `${SUNO_MODELS.slice(0, 3).join(' | ')} (default ${DEFAULT_GEN_MODEL}; V6_WILD = more varied/experimental, ` +
+  'V6_MINI = fast/cheap draft). Deprecated but still accepted: V5_5 | V5 | V4_5PLUS | V4_5ALL | V4_5 | V4. Dots normalized'
+const durationSchema = z
+  .number()
+  .int()
+  .min(10)
+  .max(360)
+  .optional()
+  .describe(
+    'Target length in seconds (10-360). Honoured ONLY in custom mode on V5_5 / V6 / V6_WILD / V6_MINI — silently ignored elsewhere'
+  )
+
+/** Loud error instead of a silently-ignored duration (the param has model + mode gates). */
+function assertDurationUsable(duration: number | undefined, model: string, customMode: boolean): void {
+  if (duration === undefined) return
+  if (!customMode) throw new Error('duration requires customMode true (style + title set).')
+  if (!DURATION_MODELS.has(model)) {
+    throw new Error(`duration is honoured only on ${[...DURATION_MODELS].join(', ')} — you picked ${model}.`)
+  }
+}
 const MAX_COVER_REFERENCE_SECONDS = 8 * 60
 
 const BACKGROUND_DESCRIBE =
@@ -565,7 +595,7 @@ const personaIdSchema = z
 const personaModelSchema = z
   .enum(['style_persona', 'voice_persona'])
   .optional()
-  .describe('style_persona (default) | voice_persona (set when personaId is a Suno Voice voiceId, V5/V5_5 only)')
+  .describe('style_persona (default) | voice_persona (set when personaId is a Suno Voice voiceId; V5_5 and the V6 family)')
 
 const generateOp: Operation<{
   prompt: string
@@ -574,6 +604,7 @@ const generateOp: Operation<{
   title?: string
   instrumental?: boolean
   model?: string
+  duration?: number
   vocalGender?: 'male' | 'female'
   negativeTags?: string
   styleWeight?: number
@@ -596,7 +627,7 @@ const generateOp: Operation<{
     prompt: z
       .string()
       .describe(
-        'Custom mode: the EXACT lyrics sung verbatim (≤5000 chars on V4_5+; supports [Verse]/[Chorus]/[Choir]/[Instrumental] metatags; ignored when instrumental). ' +
+        'Custom mode: the EXACT lyrics sung verbatim (≤5000 chars on V4_5 and later; supports [Verse]/[Chorus]/[Choir]/[Instrumental] metatags; ignored when instrumental). ' +
           'Non-custom mode: a ≤500-char track description — Suno writes its own lyrics'
       ),
     customMode: z
@@ -609,13 +640,11 @@ const generateOp: Operation<{
     style: z
       .string()
       .optional()
-      .describe('Music style text (≤1000 chars on V4_5+). Required in custom mode'),
+      .describe('Music style text (≤1000 chars on V4_5 and later). Required in custom mode'),
     title: z.string().optional().describe('Track title (≤100 chars). Required in custom mode'),
     instrumental: z.boolean().optional().describe('Generate without vocals (default false)'),
-    model: z
-      .string()
-      .optional()
-      .describe(`V4 | V4_5 | V4_5PLUS | V4_5ALL | V5 | V5_5 (default ${DEFAULT_GEN_MODEL}; dots normalized)`),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
+    duration: durationSchema,
     vocalGender: z.enum(['male', 'female']).optional(),
     negativeTags: z
       .string()
@@ -640,7 +669,8 @@ const generateOp: Operation<{
         'Non-custom prompts cap at 500 chars (it is a description, not lyrics). For literal lyrics set customMode true + style + title.'
       )
     }
-    const model = (input.model ?? DEFAULT_GEN_MODEL).replace(/\./g, '_')
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
+    assertDurationUsable(input.duration, model, customMode)
     const baseName = input.title?.trim() || input.prompt.slice(0, 60).trim() || 'Generated track'
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
@@ -652,6 +682,7 @@ const generateOp: Operation<{
       instrumental: input.instrumental ?? false,
       customMode,
       model,
+      duration: input.duration,
       vocalGender: input.vocalGender,
       negativeTags: input.negativeTags,
       styleWeight: input.styleWeight,
@@ -673,6 +704,7 @@ const generateOp: Operation<{
         title: input.title,
         instrumental: input.instrumental ?? false,
         model,
+        duration: input.duration,
         vocalGender: input.vocalGender ?? null,
         negativeTags: input.negativeTags,
         styleWeight: input.styleWeight,
@@ -700,6 +732,7 @@ const soundsOp: Operation<{
   tempo?: number
   loop?: boolean
   grabLyrics?: boolean
+  model?: string
   projectId?: string
   trackId?: string
   background?: boolean
@@ -715,6 +748,7 @@ const soundsOp: Operation<{
     tempo: z.number().int().min(1).max(300).optional().describe('BPM lock; omit for auto'),
     loop: z.boolean().optional().describe('Generate as a loopable sound'),
     grabLyrics: z.boolean().optional().describe('Also capture lyric subtitles when the sound has vocals'),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
     projectId: z.string().optional(),
     trackId: landingTrackIdSchema,
     background: z.boolean().optional()
@@ -723,13 +757,15 @@ const soundsOp: Operation<{
     const baseName = input.prompt.slice(0, 60).trim() || 'Sound'
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
 
     const taskId = await createSoundsGeneration({
       prompt: input.prompt,
       soundKey: input.soundKey,
       soundTempo: input.tempo,
       soundLoop: input.loop,
-      grabLyrics: input.grabLyrics
+      grabLyrics: input.grabLyrics,
+      model
     })
 
     const manifest = newJobManifest(
@@ -740,7 +776,7 @@ const soundsOp: Operation<{
       {
         prompt: input.prompt,
         instrumental: true,
-        model: 'V5',
+        model,
         soundKey: input.soundKey,
         soundTempo: input.tempo,
         soundLoop: input.loop ?? false,
@@ -806,6 +842,7 @@ const coverOp: Operation<{
   title?: string
   instrumental?: boolean
   model?: string
+  duration?: number
   vocalGender?: 'male' | 'female'
   negativeTags?: string
   audioWeight?: number
@@ -826,7 +863,7 @@ const coverOp: Operation<{
     'the line to perform, NOT the full mix (full mix in = a choir performing your drums). Layering settings ' +
     'that lock structure while swapping timbre: audioWeight 0.7-0.85, styleWeight 0.55-0.75, ' +
     'weirdnessConstraint 0.2-0.4. 2 variations land as cover assets linked to the source. ' +
-    'PAID (~12 Suno credits + ~0.4/WAV) — check aurora_get_credits first. ' +
+    'PAID (Suno credits + ~0.4/WAV; 12 cr/gen was the V5_5 figure, v6 unobserved) — check aurora_get_credits first. ' +
     BACKGROUND_DESCRIBE,
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to transform'),
@@ -836,13 +873,11 @@ const coverOp: Operation<{
       .boolean()
       .optional()
       .describe('true = style + title required, prompt = literal lyrics. Default: true when style or title is set'),
-    style: z.string().optional().describe('Target style (custom mode needs BOTH style and title; ≤1000 chars on V4_5+)'),
+    style: z.string().optional().describe('Target style (custom mode needs BOTH style and title; ≤1000 chars on V4_5 and later)'),
     title: z.string().optional(),
     instrumental: z.boolean().optional(),
-    model: z
-      .string()
-      .optional()
-      .describe(`V4 | V4_5 | V4_5PLUS | V4_5ALL | V5 | V5_5 (default ${DEFAULT_GEN_MODEL}; V4_5ALL caps input at 1 min)`),
+    model: z.string().optional().describe(`${MODEL_DESCRIBE}. V4_5ALL caps input at 1 min`),
+    duration: durationSchema,
     vocalGender: z.enum(['male', 'female']).optional(),
     negativeTags: z.string().optional().describe('Styles/instruments to exclude, ONE comma-separated string'),
     audioWeight: z.number().min(0).max(1).optional().describe('0..1 — 0 = new style dominates, 1 = stay close to the source. 0.7-0.85 = structure locked, timbre swapped'),
@@ -870,7 +905,8 @@ const coverOp: Operation<{
     if (customMode && (!input.style || !input.title)) {
       throw new Error('Custom mode needs BOTH a style and a title (you set only one).')
     }
-    const model = (input.model ?? DEFAULT_GEN_MODEL).replace(/\./g, '_')
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
+    assertDurationUsable(input.duration, model, customMode)
 
     // 8-minute reference cap (pre-checked; the provider enforces it too).
     const duration = await probeDurationSeconds(sourcePath)
@@ -881,12 +917,7 @@ const coverOp: Operation<{
     }
 
     const baseName = input.title?.trim() || `${basename(sourcePath, extname(sourcePath))} cover`.trim()
-    const projectId = input.projectId
-      ? (getProject(input.projectId)?.id ??
-        (() => {
-          throw new Error(`Project not found: ${input.projectId}`)
-        })())
-      : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
+    const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
 
     const trackId = resolveLandingTrack(projectId, input.trackId)
     const uploadUrl = await uploadSourceAudio(sourcePath)
@@ -898,6 +929,7 @@ const coverOp: Operation<{
       instrumental: input.instrumental ?? false,
       customMode,
       model,
+      duration: input.duration,
       vocalGender: input.vocalGender,
       negativeTags: input.negativeTags,
       audioWeight: input.audioWeight,
@@ -919,6 +951,7 @@ const coverOp: Operation<{
         title: input.title,
         instrumental: input.instrumental ?? false,
         model,
+        duration: input.duration,
         vocalGender: input.vocalGender ?? null,
         negativeTags: input.negativeTags,
         audioWeight: input.audioWeight,
@@ -999,7 +1032,7 @@ const addVocalsOp: Operation<{
     styleWeight: styleWeightSchema,
     weirdnessConstraint: weirdnessSchema,
     audioWeight: audioWeightSchema,
-    model: z.string().optional().describe('V4_5PLUS (default) | V5 | V5_5 — this endpoint supports only these'),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
     projectId: z.string().optional(),
     trackId: landingTrackIdSchema,
     background: z.boolean().optional(),
@@ -1007,13 +1040,9 @@ const addVocalsOp: Operation<{
   }),
   async run(input) {
     const { sourcePath, sourceAsset } = resolveSourcePath(input)
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
     const baseName = input.title.trim() || `${basename(sourcePath, extname(sourcePath))} vocals`
-    const projectId = input.projectId
-      ? (getProject(input.projectId)?.id ??
-        (() => {
-          throw new Error(`Project not found: ${input.projectId}`)
-        })())
-      : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
+    const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
 
     const trackId = resolveLandingTrack(projectId, input.trackId)
     const uploadUrl = await uploadSourceAudio(sourcePath)
@@ -1027,7 +1056,7 @@ const addVocalsOp: Operation<{
       styleWeight: input.styleWeight,
       weirdnessConstraint: input.weirdnessConstraint,
       audioWeight: input.audioWeight,
-      model: (input.model ?? 'V4_5PLUS').replace(/\./g, '_')
+      model
     })
 
     const manifest = newJobManifest(
@@ -1045,7 +1074,7 @@ const addVocalsOp: Operation<{
         styleWeight: input.styleWeight,
         weirdnessConstraint: input.weirdnessConstraint,
         audioWeight: input.audioWeight,
-        model: (input.model ?? 'V4_5PLUS').replace(/\./g, '_'),
+        model,
         instrumental: false
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
@@ -1116,7 +1145,7 @@ const addInstrumentalOp: Operation<{
     styleWeight: styleWeightSchema,
     weirdnessConstraint: weirdnessSchema,
     audioWeight: audioWeightSchema,
-    model: z.string().optional().describe('V4_5PLUS (default) | V5 | V5_5 — this endpoint supports only these'),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
     projectId: z.string().optional(),
     trackId: landingTrackIdSchema,
     background: z.boolean().optional(),
@@ -1124,13 +1153,9 @@ const addInstrumentalOp: Operation<{
   }),
   async run(input) {
     const { sourcePath, sourceAsset } = resolveSourcePath(input)
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
     const baseName = input.title.trim() || `${basename(sourcePath, extname(sourcePath))} instrumental`
-    const projectId = input.projectId
-      ? (getProject(input.projectId)?.id ??
-        (() => {
-          throw new Error(`Project not found: ${input.projectId}`)
-        })())
-      : (sourceAsset?.projectId ?? (await createProject(baseName)).id)
+    const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
 
     const uploadUrl = await uploadSourceAudio(sourcePath)
@@ -1143,7 +1168,7 @@ const addInstrumentalOp: Operation<{
       styleWeight: input.styleWeight,
       weirdnessConstraint: input.weirdnessConstraint,
       audioWeight: input.audioWeight,
-      model: (input.model ?? 'V4_5PLUS').replace(/\./g, '_')
+      model
     })
 
     const manifest = newJobManifest(
@@ -1160,7 +1185,7 @@ const addInstrumentalOp: Operation<{
         styleWeight: input.styleWeight,
         weirdnessConstraint: input.weirdnessConstraint,
         audioWeight: input.audioWeight,
-        model: (input.model ?? 'V4_5PLUS').replace(/\./g, '_'),
+        model,
         instrumental: true
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
@@ -1187,6 +1212,369 @@ const addInstrumentalOp: Operation<{
     const summary = jobSummary(finished)
     if (wavNotes.length > 0) (summary as Record<string, unknown>).wavStage = wavNotes
     return ok(summary, `${jobText(finished)}${wavNotes.length > 0 ? ` WAV stage: ${wavNotes.join('; ')}` : ''}`)
+  }
+}
+
+// ── v6-era ops: extend / replace-section / mashup ───────────────
+// All three land through the generation job path (record-info poll). Wire
+// shapes: docs/suno-param-surface.md (verified 2026-09-14).
+
+/** Blocking-mode tail shared by the source-derived ops: optional WAV stage +
+ *  summary text. */
+async function finishDerivedJob(
+  manifest: JobManifest,
+  input: { background?: boolean; fetchWav?: boolean }
+): Promise<OperationResult> {
+  if (input.background) return ok(jobSummary(manifest), jobText(manifest))
+  const finished = await awaitJob(manifest)
+  const wavNotes: string[] = []
+  if (finished.status === 'done' && (input.fetchWav ?? false)) {
+    for (const assetId of finished.assetIds) {
+      try {
+        await fetchWavOp.run({ assetId })
+        wavNotes.push(`${assetId}: WAV fetched`)
+      } catch (err) {
+        wavNotes.push(`${assetId}: WAV failed (${err instanceof Error ? err.message : err}) — MP3 kept; retry with aurora_fetch_wav`)
+      }
+    }
+  }
+  const summary = jobSummary(finished)
+  if (wavNotes.length > 0) (summary as Record<string, unknown>).wavStage = wavNotes
+  return ok(summary, `${jobText(finished)}${wavNotes.length > 0 ? ` WAV stage: ${wavNotes.join('; ')}` : ''}`)
+}
+
+/** Project for a derived op: explicit id → the source asset's project → a new one. */
+async function resolveDerivedProject(projectId: string | undefined, sourceAsset: ProjectAsset | null, baseName: string): Promise<string> {
+  if (projectId) {
+    const p = getProject(projectId)
+    if (!p) throw new Error(`Project not found: ${projectId}`)
+    return p.id
+  }
+  return sourceAsset?.projectId ?? (await createProject(baseName)).id
+}
+
+/** Provider ids a Suno-generated asset carries in its origin (landed by both
+ *  the app and the MCP). Null when the asset was imported or split. */
+function sunoIdsOf(asset: ProjectAsset | null): { taskId: string; audioId: string } | null {
+  const o = asset?.origin as { taskId?: unknown; audioId?: unknown } | null | undefined
+  const taskId = typeof o?.taskId === 'string' ? o.taskId : null
+  const audioId = typeof o?.audioId === 'string' ? o.audioId : null
+  return taskId && audioId ? { taskId, audioId } : null
+}
+
+const extendOp: Operation<{
+  sourceAssetId?: string
+  sourcePath?: string
+  continueAt?: number
+  prompt?: string
+  style?: string
+  title?: string
+  instrumental?: boolean
+  model?: string
+  vocalGender?: 'male' | 'female'
+  negativeTags?: string
+  styleWeight?: number
+  weirdnessConstraint?: number
+  audioWeight?: number
+  personaId?: string
+  personaModel?: 'style_persona' | 'voice_persona'
+  projectId?: string
+  trackId?: string
+  background?: boolean
+  fetchWav?: boolean
+}> = {
+  id: 'aurora_extend',
+  description:
+    'Continue a track past a point in time (Suno extend). A Suno-generated asset routes by its provider ' +
+    'ids (no upload, so the "matches an existing recording" guard never fires); an imported asset or ' +
+    'external file routes through upload-extend (max 8 min, Suno\'s own output rejected there). Set ' +
+    'style + title to steer the continuation (custom mode); omit both and the provider reuses the ' +
+    "source's own settings. 2 variations land linked to the source. PAID (Suno credits; v6 cost unobserved, check aurora_get_credits). " +
+    BACKGROUND_DESCRIBE,
+  input: z.object({
+    sourceAssetId: z.string().optional().describe('Project asset to continue'),
+    sourcePath: z.string().optional().describe('OR an external audio file path (upload-extend route)'),
+    continueAt: z
+      .number()
+      .min(0)
+      .optional()
+      .describe('Seconds into the source where the continuation starts. Required in custom mode; must be < source length'),
+    prompt: z.string().optional().describe('Custom mode: exact lyrics for the new section (omit when instrumental)'),
+    style: z.string().optional().describe('Custom mode: style for the continuation (≤1000 chars). Set with title'),
+    title: z.string().optional().describe('Custom mode: title (≤100 chars). Set with style'),
+    instrumental: z.boolean().optional(),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
+    vocalGender: z.enum(['male', 'female']).optional(),
+    negativeTags: z.string().optional().describe('Styles/instruments to exclude, ONE comma-separated string'),
+    styleWeight: styleWeightSchema,
+    weirdnessConstraint: weirdnessSchema,
+    audioWeight: audioWeightSchema,
+    personaId: personaIdSchema,
+    personaModel: personaModelSchema,
+    projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
+    background: z.boolean().optional(),
+    fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false; ~0.4 credits each)')
+  }),
+  async run(input) {
+    const customMode = Boolean(input.style || input.title)
+    if (customMode && (!input.style || !input.title)) {
+      throw new Error('Custom mode needs BOTH a style and a title (you set only one).')
+    }
+    if (customMode && input.continueAt === undefined) {
+      throw new Error('Custom mode needs continueAt (seconds into the source to continue from).')
+    }
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
+    const { sourcePath, sourceAsset } = resolveSourcePath(input)
+    const ids = sunoIdsOf(sourceAsset)
+    const baseName = input.title?.trim() || `${basename(sourcePath, extname(sourcePath))} extended`
+    const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
+
+    const shared = {
+      defaultParamFlag: customMode,
+      model,
+      instrumental: input.instrumental,
+      prompt: input.prompt,
+      style: input.style,
+      title: input.title,
+      continueAt: input.continueAt,
+      vocalGender: input.vocalGender,
+      negativeTags: input.negativeTags,
+      styleWeight: input.styleWeight,
+      weirdnessConstraint: input.weirdnessConstraint,
+      audioWeight: input.audioWeight,
+      personaId: input.personaId,
+      personaModel: input.personaModel
+    }
+
+    let taskId: string
+    let route: 'extend' | 'upload-extend'
+    if (ids) {
+      route = 'extend'
+      taskId = await createExtend({ ...shared, audioId: ids.audioId, taskId: ids.taskId })
+    } else {
+      route = 'upload-extend'
+      const duration = await probeDurationSeconds(sourcePath)
+      if (duration !== null && duration > MAX_COVER_REFERENCE_SECONDS) {
+        throw new Error(`Source is ${Math.round(duration)}s — upload-extend caps the input at 8 minutes.`)
+      }
+      if (duration !== null && input.continueAt !== undefined && input.continueAt >= duration) {
+        throw new Error(`continueAt (${input.continueAt}s) must be inside the source (${Math.round(duration)}s).`)
+      }
+      const uploadUrl = await uploadSourceAudio(sourcePath)
+      taskId = await createUploadExtend({ ...shared, uploadUrl })
+    }
+
+    const manifest = newJobManifest(
+      'extend',
+      `xtd-${uuidv4().slice(0, 8)}`,
+      projectId,
+      baseName,
+      { op: 'extend', route, ...shared, vocalGender: input.vocalGender ?? null },
+      { taskId, sourceAssetId: sourceAsset?.id ?? null }
+    )
+    manifest.trackId = trackId
+    await saveJob(manifest)
+    return finishDerivedJob(manifest, input)
+  }
+}
+
+const replaceSectionOp: Operation<{
+  sourceAssetId?: string
+  sourcePath?: string
+  startS: number
+  endS: number
+  prompt: string
+  fullLyrics: string
+  tags: string
+  title: string
+  negativeTags?: string
+  model?: string
+  projectId?: string
+  trackId?: string
+  background?: boolean
+  fetchWav?: boolean
+}> = {
+  id: 'aurora_replace_section',
+  description:
+    'v6 section editing (Suno replace-section): re-generate ONE time window of a track (≥10 s) and keep ' +
+    'everything outside it. A Suno-generated asset routes by provider ids (no upload); anything else ' +
+    'uploads (Suno\'s own output rejected on that route). Give the new lyrics for the window AND the ' +
+    'full lyrics of the song after the edit. 2 variations land linked to the source. PAID (Suno credits). ' +
+    BACKGROUND_DESCRIBE,
+  input: z.object({
+    sourceAssetId: z.string().optional().describe('Project asset to edit'),
+    sourcePath: z.string().optional().describe('OR an external audio file path'),
+    startS: z.number().min(0).describe('Window start, seconds (2 decimals)'),
+    endS: z.number().min(0).describe('Window end, seconds; at least 10 s after startS'),
+    prompt: z.string().describe('Lyrics for the replaced window (instrumental sections: a short direction still goes here)'),
+    fullLyrics: z.string().describe('The COMPLETE lyrics of the song after the edit'),
+    tags: z.string().describe('Style tags for the new section (this endpoint names the field tags)'),
+    title: z.string().max(100),
+    negativeTags: z.string().optional().describe('Styles to exclude, ONE comma-separated string'),
+    model: z.string().optional().describe(`${MODEL_DESCRIBE}. Upload route only — the id route reuses the source model`),
+    projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
+    background: z.boolean().optional(),
+    fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false)')
+  }),
+  async run(input) {
+    if (input.endS - input.startS < 10) throw new Error('The window must be at least 10 seconds wide.')
+    const { sourcePath, sourceAsset } = resolveSourcePath(input)
+    const ids = sunoIdsOf(sourceAsset)
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
+    const baseName = input.title.trim() || `${basename(sourcePath, extname(sourcePath))} edit`
+    const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
+
+    const common = {
+      prompt: input.prompt,
+      tags: input.tags,
+      title: input.title,
+      infillStartS: input.startS,
+      infillEndS: input.endS,
+      fullLyrics: input.fullLyrics,
+      negativeTags: input.negativeTags
+    }
+    let taskId: string
+    let route: 'ids' | 'upload'
+    if (ids) {
+      route = 'ids'
+      taskId = await createReplaceSection({ ...common, ...ids })
+    } else {
+      route = 'upload'
+      const uploadUrl = await uploadSourceAudio(sourcePath)
+      taskId = await createReplaceSection({ ...common, uploadUrl, model })
+    }
+
+    const manifest = newJobManifest(
+      'replace_section',
+      `rep-${uuidv4().slice(0, 8)}`,
+      projectId,
+      baseName,
+      { op: 'replace_section', route, ...common, model: route === 'upload' ? model : undefined, instrumental: false },
+      { taskId, sourceAssetId: sourceAsset?.id ?? null }
+    )
+    manifest.trackId = trackId
+    await saveJob(manifest)
+    return finishDerivedJob(manifest, input)
+  }
+}
+
+const mashupOp: Operation<{
+  sourceAssetIdA?: string
+  sourcePathA?: string
+  sourceAssetIdB?: string
+  sourcePathB?: string
+  prompt?: string
+  customMode?: boolean
+  style?: string
+  title?: string
+  instrumental?: boolean
+  model?: string
+  duration?: number
+  vocalGender?: 'male' | 'female'
+  styleWeight?: number
+  weirdnessConstraint?: number
+  audioWeight?: number
+  projectId?: string
+  trackId?: string
+  background?: boolean
+  fetchWav?: boolean
+}> = {
+  id: 'aurora_mashup',
+  description:
+    'v6 mashup (Suno generate-mashup): compose one track from TWO uploaded sources. Both sources upload, ' +
+    "so Suno's own output is rejected (catalog guard) — feed your own renders/stems. Custom mode (style + " +
+    'title) steers the result; non-custom takes a ≤500-char prompt. 2 variations land linked to source A. ' +
+    'PAID (Suno credits). ' +
+    BACKGROUND_DESCRIBE,
+  input: z.object({
+    sourceAssetIdA: z.string().optional().describe('First source: project asset'),
+    sourcePathA: z.string().optional().describe('OR first source: external file'),
+    sourceAssetIdB: z.string().optional().describe('Second source: project asset'),
+    sourcePathB: z.string().optional().describe('OR second source: external file'),
+    prompt: z.string().optional().describe('Custom mode: exact lyrics. Non-custom: ≤500-char description'),
+    customMode: z.boolean().optional().describe('Default: true when style or title is set'),
+    style: z.string().optional().describe('≤1000 chars; custom mode needs BOTH style and title'),
+    title: z.string().max(80).optional().describe('≤80 chars on this endpoint'),
+    instrumental: z.boolean().optional(),
+    model: z.string().optional().describe(MODEL_DESCRIBE),
+    duration: durationSchema,
+    vocalGender: z.enum(['male', 'female']).optional(),
+    styleWeight: styleWeightSchema,
+    weirdnessConstraint: weirdnessSchema,
+    audioWeight: audioWeightSchema,
+    projectId: z.string().optional(),
+    trackId: landingTrackIdSchema,
+    background: z.boolean().optional(),
+    fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false)')
+  }),
+  async run(input) {
+    const a = resolveSourcePath({ sourceAssetId: input.sourceAssetIdA, sourcePath: input.sourcePathA })
+    const b = resolveSourcePath({ sourceAssetId: input.sourceAssetIdB, sourcePath: input.sourcePathB })
+    const customMode = input.customMode ?? Boolean(input.style || input.title)
+    if (customMode && (!input.style || !input.title)) {
+      throw new Error('Custom mode needs BOTH a style and a title (you set only one).')
+    }
+    if (!customMode && (input.prompt?.length ?? 0) > 500) {
+      throw new Error('Non-custom prompts cap at 500 chars.')
+    }
+    const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
+    assertDurationUsable(input.duration, model, customMode)
+    for (const src of [a, b]) {
+      const d = await probeDurationSeconds(src.sourcePath)
+      if (d !== null && d > MAX_COVER_REFERENCE_SECONDS) {
+        throw new Error(`${basename(src.sourcePath)} is ${Math.round(d)}s — uploads cap at 8 minutes.`)
+      }
+    }
+    const baseName = input.title?.trim() || `${basename(a.sourcePath, extname(a.sourcePath))} mashup`
+    const projectId = await resolveDerivedProject(input.projectId, a.sourceAsset, baseName)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
+
+    const urlA = await uploadSourceAudio(a.sourcePath)
+    const urlB = await uploadSourceAudio(b.sourcePath)
+    const taskId = await createMashup({
+      uploadUrlList: [urlA, urlB],
+      customMode,
+      model,
+      prompt: input.prompt,
+      style: input.style,
+      title: input.title,
+      instrumental: input.instrumental,
+      duration: input.duration,
+      vocalGender: input.vocalGender,
+      styleWeight: input.styleWeight,
+      weirdnessConstraint: input.weirdnessConstraint,
+      audioWeight: input.audioWeight
+    })
+
+    const manifest = newJobManifest(
+      'mashup',
+      `mup-${uuidv4().slice(0, 8)}`,
+      projectId,
+      baseName,
+      {
+        op: 'mashup',
+        customMode,
+        prompt: input.prompt,
+        style: input.style,
+        title: input.title,
+        instrumental: input.instrumental ?? false,
+        model,
+        duration: input.duration,
+        vocalGender: input.vocalGender ?? null,
+        styleWeight: input.styleWeight,
+        weirdnessConstraint: input.weirdnessConstraint,
+        audioWeight: input.audioWeight,
+        sourceB: b.sourceAsset?.id ?? b.sourcePath
+      },
+      { taskId, sourceAssetId: a.sourceAsset?.id ?? null }
+    )
+    manifest.trackId = trackId
+    await saveJob(manifest)
+    return finishDerivedJob(manifest, input)
   }
 }
 
@@ -1586,6 +1974,9 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
   coverOp,
   addVocalsOp,
   addInstrumentalOp,
+  extendOp,
+  replaceSectionOp,
+  mashupOp,
   splitOp,
   extractOp,
   getJobStatusOp,

@@ -23,7 +23,7 @@ aurora-mcp/
     │     jobs.ts               ← background-job manifests (userData/agent-jobs/)
     │     sidecars.ts           ← RVC/MIDI python spawns (need AURORA_REPO env)
     │     audio/{ffmpeg,wav}.ts ← @ffmpeg-installer ops + RIFF codec (port)
-    │     operations/index.ts   ← single source of truth for the 31-tool surface
+    │     operations/index.ts   ← single source of truth for the 34-tool surface
     ├── mcp/                    ← @ericdisero/aurora-mcp-server (bin: aurora-mcp-server)
     └── cli/                    ← @ericdisero/aurora-cli (bin: aurora)
         src/commands/{op,install-skills,keys,status,mcp}.ts
@@ -37,8 +37,8 @@ aurora-mcp/
 - **Storage-semantics lockstep.** `storage/*.ts` and `split.ts` are ports of the app's modules (see the contract table below) — behavior changes go into BOTH codebases or neither.
 - **Provider URLs expire server-side.** Always download-and-persist; `streamUrls` are preview-only, never stored as asset paths.
 - **NEVER throw a provider failure as status-only.** Every distinct cause reports the same `GENERATE_AUDIO_FAILED`, so a status-only error is indistinguishable from every other failure and forces blind guessing. `record-info` returns `errorCode` + `errorMessage`; parse and surface them at EVERY throw site (`generationFailureDetail()` in `providers/suno.ts`; app mirror in `suno-client.ts`). Fixed 2026-07-31 after three failed covers were debugged by hand-querying the API — the answer was in the response the whole time.
-- **Cover-of-a-Suno-track does not work by re-upload.** `upload-cover` rejects Suno's own output: `errorCode 413` "This audio matches an existing recording in our catalog." Use the `taskId`/`audioId` endpoints (`extend-music`, `cover-suno`) — unwired today, and the top candidates for the next op. Full findings + scope caveats: `docs/suno-param-surface.md`.
-- **Re-verify the param surface against live docs before declaring a param absent** — `docs/suno-param-surface.md` silently went stale for 7 weeks (missed `duration`, 10–360s, needs `customMode:true` + `model:V5_5`).
+- **Cover-of-a-Suno-track does not work by re-upload.** `upload-cover` (and upload-extend / mashup / replace-section upload-mode) rejects Suno's own output: `errorCode 413` "This audio matches an existing recording in our catalog." To iterate on a Suno take use the `taskId`/`audioId` routes — `aurora_extend` and `aurora_replace_section` pick them automatically when the source asset carries provider ids (wired 2026-09-14). `cover-suno` is cover ART, not an audio cover. Full findings + scope caveats: `docs/suno-param-surface.md`.
+- **Re-verify the param surface against live docs before declaring a param absent** — `docs/suno-param-surface.md` went stale twice (missed `duration` for 7 weeks; missed the 2026-09-09 v6 model enum for 5 days). **Model enum + default live ONLY in `providers/suno.ts` (`SUNO_MODELS`, `DEFAULT_SUNO_MODEL`, `normalizeModel`)** — ops and docs reference it, never restate it.
 - **Destructive ops require `confirm: true`** (delete_asset, delete_project). Splits refuse to re-spend when 7 stems exist.
 - **NEVER commit.** Eric commits at his checkpoints.
 
@@ -57,6 +57,7 @@ Every op's logic traces to a verified aurora module. Drift check = diff these pa
 | aurora_sounds | `tools/bridge/commands/sounds.ts` + project landing per generation:generate |
 | aurora_cover | `ipc/generation.ts runCover` (8-min cap, AIFF/FLAC standardize, custom-mode rule, model dots→underscores, best-effort WAV) |
 | aurora_add_vocals / add_instrumental | NEW 2026-06-10 — same thin provider client (`providers/suno.ts`), upload pipeline shared with cover, lands as generation assets via the job system; param shapes verified in `docs/suno-param-surface.md` |
+| aurora_extend / replace_section / mashup | NEW 2026-09-14 (Suno v6) — MCP-only, no app counterpart yet. `providers/suno.ts createExtend/createUploadExtend/createReplaceSection/createMashup`; source with provider ids → id route, else upload route; land as `cover`-kind assets linked to the source (mashup: to source A) via the shared generation job path. Wire shapes: `docs/suno-param-surface.md` |
 | aurora_split | `src/main/split/orchestrate.ts` (specs/pickFile/phase-cancel verbatim) restructured progressive |
 | aurora_extract | `src/main/extract/orchestrate.ts` + `src/shared/extract-catalog.ts` (LOCKSTEP copies here: `extract.ts`, `extract-catalog.ts`, `key-detect.ts`, `storage/extractions.ts`), restructured as a sequential one-interaction-per-advance job; `estimateOnly` returns the call plan free |
 | aurora_get_job_status / list_jobs | new (bridge `lib/job.ts` manifest discipline + provider single-shot polls) |
@@ -84,7 +85,7 @@ Test against an isolated library: set `AURORA_USER_DATA=%TEMP%\aurora-mcp-test` 
 
 ## Publishing
 
-**0.3.0 is the current release (31 ops; schema v3 — tracks + favorites + generate-into-track, Stack ops removed; published 2026-06-12). 0.2.0 (2026-06-10) was 30 ops / schema v2; 0.1.0 was the first publish (2026-06-10 AM). 0.3.0 CLIs/MCP refuse a v4+ DB by design.** Next release: bump `version` in all THREE package.jsons AND the exact-version `@ericdisero/aurora-shared` dependency pins in packages/mcp + packages/cli (they must match shared's new version), then `npm run publish:all` from the root (shared lands before mcp/cli). Token in `~/.npmrc` (see second-brain `business/operations/account-logins.md` — needs read-write + ALL-packages scope; a package-scoped granular token 404s on new packages). Scope note: published under `@ericdisero/*` because the `auroradaw` npm org doesn't exist (free-tier org creation is web-UI-only — Eric's call whether to create it and republish under `@auroradaw/*`). github.com/EricDisero/aurora-mcp is PUBLIC (created + published 2026-06-10) — the npm listing's repo link resolves and Smithery submission is unblocked.
+**0.3.0 is the current release (31 ops; the working tree carries 34 — extend / replace_section / mashup + the v6 model enum, unpublished as of 2026-09-14; schema v3 — tracks + favorites + generate-into-track, Stack ops removed; published 2026-06-12). 0.2.0 (2026-06-10) was 30 ops / schema v2; 0.1.0 was the first publish (2026-06-10 AM). 0.3.0 CLIs/MCP refuse a v4+ DB by design.** Next release: bump `version` in all THREE package.jsons AND the exact-version `@ericdisero/aurora-shared` dependency pins in packages/mcp + packages/cli (they must match shared's new version), then `npm run publish:all` from the root (shared lands before mcp/cli). Token in `~/.npmrc` (see second-brain `business/operations/account-logins.md` — needs read-write + ALL-packages scope; a package-scoped granular token 404s on new packages). Scope note: published under `@ericdisero/*` because the `auroradaw` npm org doesn't exist (free-tier org creation is web-UI-only — Eric's call whether to create it and republish under `@auroradaw/*`). github.com/EricDisero/aurora-mcp is PUBLIC (created + published 2026-06-10) — the npm listing's repo link resolves and Smithery submission is unblocked.
 
 ## Skills
 

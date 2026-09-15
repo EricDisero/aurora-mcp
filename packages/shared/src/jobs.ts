@@ -33,6 +33,9 @@ export type JobKind =
   | 'cover'
   | 'add_vocals'
   | 'add_instrumental'
+  | 'extend'
+  | 'replace_section'
+  | 'mashup'
   | 'split'
   | 'extract'
 
@@ -146,7 +149,11 @@ async function landGenerationAssets(
   m: JobManifest,
   variations: Array<{ id?: string; audioUrl?: string }>
 ): Promise<void> {
-  const kind = m.kind === 'cover' ? 'cover' : 'generation'
+  // Source-derived transforms land as 'cover' kind (linked to the source);
+  // from-nothing generations as 'generation'. add_vocals/add_instrumental/
+  // sounds keep their historical 'generation' landing.
+  const derived = m.kind === 'cover' || m.kind === 'extend' || m.kind === 'replace_section' || m.kind === 'mashup'
+  const kind = derived && m.provider.sourceAssetId ? 'cover' : 'generation'
   const outputDir = await ensureKindDir(m.projectId, kind, m.trackId)
 
   for (let i = 0; i < variations.length; i++) {
