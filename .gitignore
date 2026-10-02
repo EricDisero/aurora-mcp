@@ -22,3 +22,6 @@ token*.json
 # first open; the blank .codex/hooks.json stops that. The real Codex hook is the
 # global adapter (second-brain/rules/agent-runtime.md).
 /.codex/
+
+# guard-claude-md.py keeps the CLAUDE.md word count it last saw here, per machine.
+.claude/hooks/.claude-md-words

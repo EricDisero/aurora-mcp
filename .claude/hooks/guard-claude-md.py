@@ -5,7 +5,7 @@ CANONICAL COPY: second-brain/tools/repo-checks/guard-claude-md.py. Installed per
 second-brain/tools/install_repo_checks.py, which stamps the cap block below; the vault
 lint fails when a repo copy drifts from the canonical file. Edit it there, never here.
 
-  CLAUDE.md    3,500 words, pay-to-add ramp at 3,000
+  CLAUDE.md    the word cap and growth check in PAY_TO_ADD and CAPS below, stamped per repo
 
 Anthropic's memory documentation targets a CLAUDE.md under 200 lines; past that a
 file "consumes more context and reduces adherence". This one loads in full, in every
@@ -14,8 +14,9 @@ because nothing in the repo objects when the file grows back. This is the object
 
 Fires after any Edit/Write to CLAUDE.md and reports, in one pass:
 
-  1. WORD CAP        -- the number above. Above the ramp, every addition is paid for
-                        by an equal deletion in the SAME edit.
+  1. WORD CAP        -- the number above. Above the ramp, growth gets one question: does
+                        every session in this repo need it? If not, it moves to docs/
+                        with a Read-when row. Length follows the job, leaning shorter.
   2. FOSSILS         -- change-archaeology: "tightened from X", "was 8,000",
                         "previously", "used to be", "changed from", "note: this was".
                         Bare dates are NOT flagged -- invariant headings legitimately
@@ -144,10 +145,10 @@ def main() -> int:
         )
     elif words > PAY_TO_ADD and before is not None and words > before:
         problems.append(
-            f"UNPAID ADDITION: {before} -> {words} words (+{words - before}), "
-            f"ramp {PAY_TO_ADD}, cap {cap}. Above the ramp every addition is "
-            f"paid for by an equal deletion in the SAME edit. Cut "
-            f"{words - before} words elsewhere or revert this."
+            f"GROWTH NEAR THE CAP: {before} -> {words} words (+{words - before}), "
+            f"ramp {PAY_TO_ADD}, cap {cap}. Keep it here only if every session in "
+            f"this repo needs it; otherwise move it to docs/ and link it from the "
+            f"Read-when table, and cut anything here that has stopped earning its place."
         )
 
     for line_no, snippet, why in find(FOSSIL_PATTERNS, text):
