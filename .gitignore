@@ -25,3 +25,6 @@ token*.json
 
 # guard-claude-md.py keeps the CLAUDE.md word count it last saw here, per machine.
 .claude/hooks/.claude-md-words
+
+# Written by scripts/test-mcp-contract.mjs on every run
+scripts/fixtures/

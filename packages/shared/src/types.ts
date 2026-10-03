@@ -86,16 +86,42 @@ export interface AppSettings {
   defaultBitDepth: 16 | 24 | 32
 }
 
-/** A single MVSEP job spec (see aurora docs/build-specs/mvsep-separation-contract.md). */
-export interface MvsepJobSpec {
-  sep_type: string
-  output_format: string
-  is_demo: string
-  add_opt1?: string
-  add_opt2?: string
+export type { MvsepJobSpec, SeparationResultFile, SeparationResult, SeparationProvider } from './separation/contracts.js'
+
+/** Safe to show an agent or persist in a job manifest. */
+export interface JobError {
+  code: string
+  message: string
+  retryable: boolean
+  nextAction: string
+  stage?: string
+  httpStatus?: number
 }
 
-export interface SeparationResultFile {
-  url: string
-  filename: string
+/** One logical paid call. A submitting attempt without a hash must be reconciled, never recreated. */
+export interface SeparationAttempt {
+  routeId: string
+  status: 'pending' | 'submitting' | 'accepted' | 'landed' | 'failed' | 'uncertain'
+  uploadName?: string
+  spec?: import('./separation/contracts.js').MvsepJobSpec
+  hash?: string
+  inputPath?: string
+  inputDigest?: string
+  submittedAt?: string
+  deliveredStemIds: string[]
+  error?: JobError
+  checks?: SeparationCheckRecord
+}
+
+export interface SeparationCheckRecord {
+  notes: string[]
+  metrics: Record<string, number>
+  checkWindowSeconds: number
+  routeDigest: string
+  catalogDate: string
+  thresholds: Record<string, number>
+  algorithm: string | null
+  outputs: Array<{ key: string; filename: string; label?: string; path?: string }>
+  unavailableReplayKeys: string[]
+  limitations: string[]
 }

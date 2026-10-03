@@ -9,8 +9,12 @@
 // LOCKSTEP: behavior mirrors the app orchestrator — changes go into both.
 
 import { join } from 'node:path'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { createSeparationJob } from './providers/mvsep.js'
+import { mkdir, readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mvsepProvider, MvsepError, separationError } from './providers/mvsep.js'
+import { ALL_ROUTES } from './separation/routes.js'
+import { submitRoute, landRouteResult } from './separation/run-route.js'
+import { describeSeparationResult } from './separation-tools.js'
 import { getAsset, getAssetExtractsDir } from './storage/assets.js'
 import { upsertExtractionStem } from './storage/extractions.js'
 import { probeDurationSeconds, standardizeToWav } from './audio/ffmpeg.js'
@@ -18,12 +22,11 @@ import { decodeWavFile, encodeWavFloat32File, subtractWavs } from './audio/wav.j
 import { detectKey } from './key-detect.js'
 import {
   EXTRACT_MAX_DURATION_SECONDS,
-  identifyOutputFiles,
   planApiCalls,
   type ExtractSelection,
   type PlannedApiCall
 } from './extract-catalog.js'
-import type { ExtractionStem, MvsepJobSpec, ProjectAsset, SeparationResultFile } from './types.js'
+import type { ExtractionStem, ProjectAsset, SeparationAttempt, SeparationResult } from './types.js'
 
 /** Serialized extract state carried by the job manifest's provider blob. */
 export interface ExtractJobState {
@@ -42,17 +45,25 @@ export interface ExtractJobState {
   detectedKey: string | null
   /** outputType: message, for calls that failed (run continues). */
   failures: string[]
+  requestedStemIds?: string[]
+  callResults?: SeparationAttempt[]
+  lastSubmittedAt?: string
 }
 
-function specFor(call: PlannedApiCall): MvsepJobSpec {
-  const spec: MvsepJobSpec = {
-    sep_type: String(call.sepType),
-    output_format: '4', // 32-bit float WAV — phase accuracy for EE
-    is_demo: '0'
-  }
-  if (call.addOpt1 !== undefined) spec.add_opt1 = String(call.addOpt1)
-  if (call.addOpt2 !== undefined) spec.add_opt2 = String(call.addOpt2)
-  return spec
+function callAttempt(state: ExtractJobState): SeparationAttempt {
+  state.callResults ??= state.calls.map((call) => ({ routeId: call.routeId, status: 'pending', deliveredStemIds: [] }))
+  return state.callResults[state.callIndex]
+}
+
+function callInputPath(state: ExtractJobState): string {
+  const call = state.calls[state.callIndex]
+  // Match the app's fallback after a failed dereverb.
+  return call.inputSource === 'dry' && state.vocalDryPath ? state.vocalDryPath : state.originalPath
+}
+
+function callOptions(state: ExtractJobState): { add_opt2: string } | undefined {
+  const call = state.calls[state.callIndex]
+  return call.addOpt2 === undefined ? undefined : { add_opt2: String(call.addOpt2) }
 }
 
 /** Cap + standardize + key-detect + plan. Runs ONCE at op time, before any
@@ -95,57 +106,102 @@ export async function prepareExtract(
       vocalDryPath: null,
       extractedFiles: {},
       detectedKey,
-      failures: []
+      failures: [],
+      requestedStemIds: plan.stemsToDeliver,
+      callResults: plan.calls.map((call) => ({ routeId: call.routeId, status: 'pending', deliveredStemIds: [] }))
     }
   }
 }
 
 /** Submit the next planned call. Mutates state (currentHash). */
-export async function submitNextExtractCall(state: ExtractJobState): Promise<void> {
+export async function submitNextExtractCall(
+  state: ExtractJobState, persist?: () => Promise<void>
+): Promise<void> {
+  if (!persist) throw new MvsepError('JOB_MANIFEST_REQUIRED', 'Extraction submission requires a saved planned manifest.',
+    false, 'Advance the extraction through advanceJob(manifest).', 'queued')
   const call = state.calls[state.callIndex]
-  const inputPath =
-    call.inputSource === 'dry' && state.vocalDryPath ? state.vocalDryPath : state.originalPath
+  const route = ALL_ROUTES[call.routeId]
+  if (!route) throw new Error(`No separation route "${call.routeId}"`)
+  const attempt = callAttempt(state)
+  if (attempt.status !== 'pending' || state.currentHash) throw new Error('This extraction call is already submitted or needs reconciliation')
+  const inputPath = callInputPath(state)
   const audio = await readFile(inputPath)
-  const { hash } = await createSeparationJob(audio, specFor(call))
-  state.currentHash = hash
+  await submitRoute({
+    ...mvsepProvider,
+    async createJob(input, spec, uploadName) {
+      const durableName = attempt.uploadName ?? uploadName
+      Object.assign(attempt, { status: 'submitting', spec, uploadName: durableName, inputPath,
+        inputDigest: createHash('sha256').update(input).digest('hex'), submittedAt: new Date().toISOString() })
+      state.lastSubmittedAt = attempt.submittedAt
+      await persist()
+      const { hash } = await mvsepProvider.createJob(input, spec, durableName)
+      state.currentHash = hash
+      state.lastSubmittedAt = new Date().toISOString()
+      Object.assign(attempt, { status: 'accepted', hash })
+      await persist()
+      return { hash }
+    }
+  }, { route, input: audio, optionOverrides: callOptions(state) })
 }
 
 /** Land a finished call's files. Mutates state (extractedFiles / vocalDryPath),
  *  then advances callIndex and clears the hash. */
 export async function landExtractCall(
   state: ExtractJobState,
-  files: SeparationResultFile[]
+  result: SeparationResult
 ): Promise<void> {
   const call = state.calls[state.callIndex]
-  const outputs = identifyOutputFiles(files, call.outputType)
+  const route = ALL_ROUTES[call.routeId]
+  if (!route) throw new Error(`No separation route "${call.routeId}"`)
+  const attempt = callAttempt(state)
+  attempt.hash ??= state.currentHash ?? undefined
+  const input = await readFile(attempt.inputPath ?? callInputPath(state))
+  if (attempt.inputDigest && createHash('sha256').update(input).digest('hex') !== attempt.inputDigest) {
+    throw new MvsepError('SEPARATION_INPUT_CHANGED', 'The extraction input changed after submission.', false,
+      'Restore the exact input bytes recorded by this attempt before checking its paid result.', 'landing')
+  }
+  const run = await landRouteResult(state.currentHash ?? attempt.hash ?? 'unknown', result, {
+    route, input, destDir: state.extractDir, optionOverrides: attempt.spec ?? callOptions(state)
+  })
 
-  for (const [stemKey, url] of Object.entries(outputs)) {
-    const dest = join(state.extractDir, `${stemKey}.wav`)
-    const res = await fetch(url)
-    if (!res.ok) throw new Error(`Stem download failed (HTTP ${res.status}): ${url}`)
-    await writeFile(dest, Buffer.from(await res.arrayBuffer()))
+  const delivered: string[] = []
+  for (const [stemKey, dest] of Object.entries(run.stems)) {
 
     if (call.type === 'dereverb') {
       if (stemKey === 'vocal_dry') {
         state.vocalDryPath = dest
         // Deliver vocal_dry only in reverb-only mode (no vocal bundle).
-        if (call.deliverVocalDry) state.extractedFiles.vocal_dry = dest
+        if (call.deliverVocalDry) { state.extractedFiles.vocal_dry = dest; delivered.push(stemKey) }
       } else if (stemKey === 'vocal_reverb') {
         state.extractedFiles.vocal_reverb = dest
+        delivered.push(stemKey)
       }
     } else {
       state.extractedFiles[stemKey] = dest
+      delivered.push(stemKey)
     }
   }
-
+  const asset = getAsset(state.assetId)
+  if (!asset) throw new Error(`Extract source asset no longer exists: ${state.assetId}`)
+  for (const stemId of delivered) {
+    upsertExtractionStem({ projectId: asset.projectId, assetId: asset.id, stemId,
+      path: state.extractedFiles[stemId], detectedKey: state.detectedKey })
+  }
+  Object.assign(attempt, { status: 'landed', deliveredStemIds: delivered,
+    checks: describeSeparationResult(route.id, result, run) })
+  delete attempt.error
   state.callIndex++
   state.currentHash = null
 }
 
 /** Record a failed call and move on (prism behavior: partial results survive). */
-export function failExtractCall(state: ExtractJobState, message: string): void {
+export function failExtractCall(state: ExtractJobState, error: unknown): void {
   const call = state.calls[state.callIndex]
-  state.failures.push(`${call?.outputType ?? 'call'}: ${message}`)
+  const detail = typeof error === 'object' && error !== null && 'code' in error && 'nextAction' in error
+    ? error as import('./types.js').JobError : separationError(error)
+  const attempt = callAttempt(state)
+  Object.assign(attempt, { status: 'failed', error: detail, hash: attempt.hash ?? state.currentHash ?? undefined })
+  state.failures.push(`${call?.outputType ?? 'call'}: ${detail.code}: ${detail.message}`)
   state.callIndex++
   state.currentHash = null
 }
@@ -161,7 +217,7 @@ export async function finalizeExtract(
 
   const original = await decodeWavFile(state.originalPath)
   const stems = await Promise.all(
-    Object.values(state.extractedFiles).map((path) => decodeWavFile(path))
+    Object.entries(state.extractedFiles).filter(([id]) => id !== 'ee').map(([, path]) => decodeWavFile(path))
   )
   const ee = subtractWavs(original, ...stems)
   const eePath = join(state.extractDir, 'ee.wav')

@@ -21,7 +21,7 @@ Full wire-param reference: `docs/suno-param-surface.md` in this repo. Research r
 
 ### Isolated / solo material from scratch (a cappella choir, solo instrument)
 
-Pure isolation is a coin flip on every model — stack the odds, expect 2-4 takes, and budget an aurora_split pass on keepers:
+Pure isolation is a coin flip on every model — stack the odds, expect 2-4 takes, and budget group extraction on keepers (`aurora_extract`, for example `choir` or `drums_full`). Load `aurora-separation-routes` for measured choices and limits:
 
 1. Style field = ALL voice/instrument descriptors: `epic cinematic choir, a cappella, sacred choral, massed voices, no instruments` (under 200 chars, max 2-3 "no X" exclusions).
 2. `negativeTags: "drums, percussion, orchestra, strings, piano, synthesizer, instruments"`.
@@ -43,17 +43,19 @@ The designed-for-layering endpoint: upload an instrumental, get vocals performed
 
 1. Feed a SIMPLIFIED bounce — harmonic skeleton + the melody the choir should relate to. Strip drums and dense ornamentation first; dense masters degrade conditioning.
 2. `style: "epic film choir, massed choral harmonies, latin chant"`, `negativeTags: "lead singer, pop vocal, rap, spoken word, autotune"`, `audioWeight` 0.7-0.85, prompt = Latin/invented syllables with `[Choir]`/`[Harmony]` tags.
-3. The output is a full mix. **Discard Suno's backing**: aurora_split the result, keep ONLY the vocals stem, and lay it over the real production. This makes it irrelevant whether the endpoint preserved or re-rendered the upload.
+3. The output is a full mix. **Discard Suno's backing**: use `aurora_extract` with `stems: ["choir"]` for choir or `["vocals_all"]` for all vocals, keep the checked vocal group, and lay it over the real production. Use `aurora_split` only when the fixed seven stems are needed. Choir under an orchestra remains rough; audition the keeper.
 
 Models: the full enum, default V6 (the pre-v6 V4_5PLUS/V5/V5_5 gate is gone).
 
 ## aurora_add_instrumental — backing built around an upload
 
-Inverse of add_vocals (input usually a vocal or melodic stem; output full mix with new instrumentation). Field name is `tags`, not `style`. Same split-and-keep-the-new-layer closer.
+Inverse of add_vocals (input usually a vocal or melodic stem; output full mix with new instrumentation). Field name is `tags`, not `style`. Extract and keep the intended instrument group using `aurora-separation-routes`; choose the fixed split when seven stems are needed.
 
 ## aurora_sounds — one-shots, instrument loops, drum kits, SFX
 
-The sample-manufacturing tool. Suno's officially named categories (verified 2026-06-12): **musical samples & drum kits** ("deep 808 kick drum one shot", "crisp hip hop snare drum", "tight clap sample", "bongo drums pattern loop"), **musical loops** (guitar riffs, basslines, synth licks), **SFX/foley/ambient**. Isolated instrument samples are intended first-party use — but Suno's own docs warn "loops may include full musical arrangements": isolation is not guaranteed, budget retries and an aurora_split pass on keepers. Choir/vocal textures are not a named category — for choir, the generate/add_vocals recipes above stay the lane.
+The sample-manufacturing tool. Suno's officially named categories (verified 2026-06-12): **musical samples & drum kits** ("deep 808 kick drum one shot", "crisp hip hop snare drum", "tight clap sample", "bongo drums pattern loop"), **musical loops** (guitar riffs, basslines, synth licks), **SFX/foley/ambient**. Isolated instrument samples are intended first-party use — but Suno's own docs warn "loops may include full musical arrangements": isolation is not guaranteed, budget retries and group extraction on keepers. Choir/vocal textures are not a named category — for choir, the generate/add_vocals recipes above stay the lane.
+
+Separation checks run before saving. A failed check saves nothing from that job; read the cause before a paid retry. A pass does not guarantee isolation, and brass/strings/keys/guitar have no cheap test for a clean audio-content label swap. Use `aurora_check_separation_result` for local checks and audition every keeper.
 
 - Prompts ≤500 chars, physical and concrete: instrument + articulation + tone ("palm-muted electric guitar riff, dry, no reverb", "huge cinematic braam, dark low brass").
 - **Outputs are SHORT**: one-shots ~2s, loops typically 2-13s (community-measured, Jan 2026; duration is officially undocumented). Never plan around 20-30s clips. Duration may be promptable ("5 second long sound of...") — adherence unverified.

@@ -33,6 +33,24 @@ out += 'export const SKILLS: Record<string, string> = {\n'
 for (const f of files) {
   const name = basename(f, '.md')
   const content = readFileSync(join(skillsDir, f), 'utf8')
+  const frontmatter = content.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
+    .match(/^---\n([\s\S]*?)\n---(?:\n|$)/)?.[1]
+  const missing = ['name', 'description'].filter((field) => {
+    const value = frontmatter?.match(new RegExp(`^${field}:[ \\t]*([^\\n]*)$`, 'm'))?.[1]?.trim()
+    if (!value) return true
+    if (/^[|>][-+]?$/.test(value)) {
+      const block = frontmatter.match(new RegExp(`^${field}:[^\\n]*\\n((?:[ \\t]+[^\\n]*\\n?)+)`, 'm'))?.[1]
+      return !block?.trim()
+    }
+    const scalar = /^(['"])[\s\S]*\1$/.test(value)
+      ? value.slice(1, -1).trim()
+      : value.replace(/[ \t]+#.*$/, '').trim()
+    return !scalar || /^(?:null|~)$/i.test(scalar) || scalar.startsWith('#')
+  })
+  if (missing.length) {
+    console.error(`[embed-skills] ${join(skillsDir, f)}: frontmatter requires non-empty ${missing.join(' and ')}`)
+    process.exit(1)
+  }
   out += `  ${JSON.stringify(name)}: ${JSON.stringify(content)},\n`
 }
 out += '}\n'

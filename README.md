@@ -1,80 +1,115 @@
 # aurora-mcp
 
-MCP server + CLI + skills package for **Aurora**, the AI audio workbench — drive music generation, style-transform covers, sample manufacturing, 7-stem separation, and DAW-ready stem organization from Claude Code, Cursor, Claude Desktop, or any MCP-capable client.
+MCP server, CLI and agent skills for Aurora, the AI audio workbench. Agents generate music, organize the local library, split audio into seven stems and extract selected instrument groups. Files land in the project folders shared with the desktop app through SQLite and disk; the app does not need to be running.
 
-This monorepo publishes two installable packages, plus their shared core:
+Version **0.4.0**: **37 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
 
-- **`@ericdisero/aurora-mcp-server`** — stdio MCP server. Run with `npx -y @ericdisero/aurora-mcp-server`.
-- **`@ericdisero/aurora-cli`** — `aurora` binary. Run with `npm i -g @ericdisero/aurora-cli`.
-- **`@ericdisero/aurora-shared`** — the operations layer both surfaces depend on.
+## What agents can do
 
-## What it does
+- Generate tracks, covers, sounds and vocal/instrumental layers through Suno; extend, replace sections and mash up source audio.
+- Create projects and tracks, import audio and references, move assets between tracks and mark favorites.
+- Split an asset into vocals, kick, snare, toms, hats, bass and Everything Else using three measured MVSEP routes plus local phase cancellation. Checked stems land progressively as each route finishes.
+- Extract whole groups, individual instruments and vocal modes. Group ids come from [`GROUP_ROUTES`](packages/shared/src/separation/routes.ts); discover them with `aurora_list_separation_routes` using `surface: "extract group"`. Extraction shares bundled calls and builds Everything Else locally.
+- Discover route quality/evidence, plan without spending, inspect separation checks, resume jobs and cancel future work. Convert or pitch-shift files locally; RVC/MIDI sidecars require the Aurora repo and their Python dependencies.
 
-The MCP/CLI gives an AI agent full control of an Aurora music library: create projects, generate full tracks (Suno), transform existing audio into new styles (covers with the `audioWeight` dial), manufacture key/tempo-locked samples and one-shots, split ANY audio into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else via MVSEP + local phase cancellation). **34 tools.** Files on disk are the product — everything lands in real project folders the Aurora desktop app shows live.
-
-Standalone by design: the server works directly against Aurora's database and project folders. The desktop app does not need to be running (mastering — analyze/mix/export — stays in the app window for now).
+Mix, mastering and Export remain interactive desktop flows. An app-control bridge for agents driving the live Mix/Export is deliberately out of scope for now.
 
 ## Setup
 
-1. Configure provider keys (once):
-   ```bash
-   npm i -g @ericdisero/aurora-cli
-   aurora keys --suno-api-key <key> --mvsep-api-key <key>
-   ```
-   (or skip the CLI and pass keys via the MCP config `env` block)
-2. Add to your MCP config:
-   ```json
-   {
-     "mcpServers": {
-       "aurora": {
-         "command": "npx",
-         "args": ["-y", "@ericdisero/aurora-mcp-server"]
-       }
-     }
-   }
-   ```
-   Claude Code one-liner: `claude mcp add aurora -- npx -y @ericdisero/aurora-mcp-server`
+Node.js 18 or newer is required. The installable packages are `@ericdisero/aurora-mcp-server` (stdio server), `@ericdisero/aurora-cli` (`aurora` binary) and their shared core, `@ericdisero/aurora-shared`.
 
-## Using it
-
-### CLI (Claude Code, terminal scripts)
+Configure keys through environment variables (`SUNO_API_KEY`, or fallback `KIE_API_KEY`, and `MVSEP_API_KEY`) or the CLI:
 
 ```bash
-aurora status                 # where Aurora's data lives + key state
-aurora install-skills         # bundled agent recipes → ./.claude/skills/<name>/SKILL.md
-aurora mcp                    # print (or copy) the MCP client config
-aurora run --list             # list every operation
-aurora run aurora_create_project --name "Midnight Drive"
-aurora run aurora_sounds --prompt "huge cinematic braam, dark low brass" --soundKey Cm --tempo 140
-aurora run aurora_split --assetId <id> --background
-aurora run aurora_get_job_status --jobId spl-xxxx
+npm i -g @ericdisero/aurora-cli
+aurora keys --suno-api-key <key> --mvsep-api-key <key>
+aurora status
 ```
 
-### Long jobs + streaming preview
+`aurora keys` stores configuration in `~/.aurora/config.json`; environment variables take precedence. Local library reads, route discovery and checks need no provider keys.
 
-Generation (1-3 min) and splits (3-5+ min) support `background: true` → poll `aurora_get_job_status`. While a generation is cooking, status includes **streamUrls — listenable ~30-45s in, minutes before the files land.** Split stems land progressively as each MVSEP job finishes. Jobs survive restarts (provider-side state in `userData/agent-jobs/`).
+For the MCP server, add this to your client's configuration:
 
-## Architecture
-
+```json
+{
+  "mcpServers": {
+    "aurora": {
+      "command": "npx",
+      "args": ["-y", "@ericdisero/aurora-mcp-server"],
+      "env": {
+        "SUNO_API_KEY": "<your key>",
+        "MVSEP_API_KEY": "<your key>"
+      }
+    }
+  }
+}
 ```
-~/.aurora/config.json          ← provider keys (or env vars; env wins)
-<userData>/aurora.db           ← Aurora's own SQLite library (WAL — app + agent coexist)
-<userData>/projects/<slug>/    ← generations/ covers/ imports/ references/ stems/ masters/
-<userData>/agent-jobs/         ← background-job manifests
 
-@ericdisero/aurora-shared      ← operations/index.ts (single tool surface), storage,
-                                  Suno + MVSEP clients, jobs, split, ffmpeg
-@ericdisero/aurora-mcp-server  ← stdio server, registers operations as MCP tools
-@ericdisero/aurora-cli         ← commander entry: run / install-skills / keys / status / mcp
-```
+The `env` block is optional when keys are saved through `aurora keys`. To run a local checkout instead, build it and configure `command: "node"` with `args: ["<absolute checkout path>/packages/mcp/dist/server.js"]`; for its CLI, replace `aurora` in the examples below with `node packages/cli/dist/index.js`.
 
-## Publishing
-
-Publish order matters: shared → mcp-server → cli (both depend on shared at an exact version). Always from the repo root:
+## Plan, start, status, check
 
 ```bash
-npm run publish:all
+aurora run --list
+aurora install-skills
+aurora run aurora_list_separation_routes --surface "extract group"
+aurora run aurora_split --assetId <id> --estimateOnly true --json
+aurora run aurora_extract --assetId <id> --stems brass,strings --estimateOnly true --json
 ```
+
+After authorizing the plan's provider spend, start one separation job and keep its returned `jobId`:
+
+```bash
+aurora run aurora_extract --assetId <id> --stems brass,strings --json
+aurora run aurora_get_job_status --jobId <job-id> --waitSeconds 30 --json
+aurora run aurora_check_separation_result --jobId <job-id> --json
+```
+
+Split and extract default to `background: true`: starting saves a queued manifest before submission. Status defaults to `advance: true`, which can submit the next paid call, poll results and land checked files. `waitSeconds` is 0-30; 0 advances once, while a positive value waits between engine units up to that budget. An interaction already in progress settles before the call stops, so this is not a hard network deadline.
+
+The MCP connection advances only jobs explicitly started or resumed through that connection. On reconnect, call status to resume. CLI callers must keep calling status themselves; the CLI leaves no worker behind. Suno operations support `background: true` but default to blocking, and their initial call submits paid generation immediately. Available `streamUrls` are expiring previews; downloaded files are the durable outputs.
+
+Jobs move through `queued`, `submitting`, `waiting` and `landing` to `completed`, `partial`, `failed` or `cancelled`. Manifests survive restarts in `<userData>/agent-jobs/`. A partial result retains successful files and diagnostics. Inspect `splitAttempts` or `callResults`, `requestedStemIds`, `extractedFiles`, `detectedKey` and `lastError` before starting replacement work. Failed/partial MCP results set `isError: true` and retain structured output; CLI `--json` exposes the same data under `data`.
+
+For snapshots or cancellation:
+
+```bash
+aurora run aurora_get_job_status --jobId <job-id> --advance false --json
+aurora run aurora_list_jobs --json
+aurora run aurora_cancel_job --jobId <job-id> --json
+```
+
+Cancellation saves local intent and stops subsequent submission, polling and landing units. An interaction already in progress settles; submitted provider work may still run and is not refunded. Saved outputs stay.
+
+## Separation checks
+
+Every provider separation result is checked before it is saved as a stem. Each job uses a unique upload name. The runner resolves **exact output keys**, cross-checks provider algorithm/type metadata when available, and rejects missing, duplicate or contradictory files. It then downloads to temporary names and checks audio shape, finite samples, route sums and applicable family tests. A failed identity/content check removes the temporary downloads and reports the reason without saving that route's stems.
+
+Drums/percussion, bass and vocals/choir have family checks. Brass, woodwinds, strings, keys and guitar rely on identity and sum checks; a clean label swap in those families can pass. A check pass is not proof of musical purity. Route discovery exposes `quality` and `evidence` before spending, including rough or untested routes.
+
+`aurora_check_separation_result` is free and local. Supply `jobId` for saved provenance and replay where possible, or `routeId`, `inputPath` and `outputs` (exact output key to local WAV path, including auxiliary checking files). Read `ok`, `problems`, `metrics`, `checkWindowSeconds` and `limitations`. Job checks explicitly report `verification: "recorded"` when discarded auxiliary outputs prevent a fresh replay; otherwise they report `"replayed"`. A completed local check can return `ok: false` without being a tool execution error.
+
+## Credits and local work
+
+Suno generation, covers, layering, editing and provider WAV conversion spend credits. MVSEP submissions spend premium minutes per planned call. Separation status advancement may initiate that spend; queuing alone does not. Split/extract `estimateOnly: true` returns exact routes/options and duration-based provider units without submitting. The extract estimate's Aurora `credits` field is future metering, not a current provider price.
+
+Route discovery, local checks, job snapshots/cancellation, library operations and local audio processing do not spend provider credits. `aurora_get_credits` is a free network balance read. Existing active split work or seven valid stems are reused without another submission. Deleting assets/projects requires `confirm: true`.
+
+## Development and free tests
+
+With dependencies installed, run from the repo root:
+
+```bash
+npm run build
+npm run typecheck
+npm run smoke
+npm run test:contract
+npm run test:surface
+```
+
+The tests use isolated libraries and offline fixtures; no Suno/MVSEP spend. `npm run typecheck` checks mirror drift, builds shared declarations and checks MCP/CLI. It needs the Aurora app checkout beside this repo, or `AURORA_REPO` pointing to it.
+
+[`separation/*.ts`](packages/shared/src/separation) and [`extract-catalog.ts`](packages/shared/src/extract-catalog.ts) are generated app mirrors. Edit the app, then run `node scripts/sync-separation.mjs`; never edit the mirrors. `node scripts/sync-separation.mjs --check` is read-only. For manual write tests, set `AURORA_USER_DATA` to an isolated test directory. `aurora status` reports the actual data and projects paths; the app's custom projects-directory setting is respected.
 
 ## License
 

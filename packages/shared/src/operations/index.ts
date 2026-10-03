@@ -34,7 +34,7 @@ import {
   SUNO_MODELS,
   uploadAudioFile
 } from '../providers/suno.js'
-import { getMvsepUserInfo } from '../providers/mvsep.js'
+import { getMvsepUserInfo, separationError } from '../providers/mvsep.js'
 import {
   createProject,
   deleteProject,
@@ -64,33 +64,169 @@ import {
   renameTrack
 } from '../storage/tracks.js'
 import { getProjectStems, getStems } from '../storage/stems.js'
-import { advanceJob, listJobs, loadJob, newJobManifest, saveJob, type JobManifest } from '../jobs.js'
-import { createSplitJobs, prepareSplit } from '../split.js'
+import { advanceJob, cancelJob, isJobActive, listJobs, loadJob, newJobManifest, saveJob, startSplitJob, type JobManifest } from '../jobs.js'
 import { prepareExtract } from '../extract.js'
 import {
   EXTRACT_BUNDLES,
   EXTRACT_INDIVIDUAL_STEMS,
-  estimateExtractCost
+  VOCAL_STEM_IDS,
+  estimateExtractCost,
+  planApiCalls
 } from '../extract-catalog.js'
+import { checkSeparationOutputs, listSeparationRoutes, planSeparationRoute } from '../separation-tools.js'
+import { SPLIT_ROUTES } from '../separation/routes.js'
 import { probeDurationSeconds, standardizeToWav, convertToMp3, pitchShift } from '../audio/ffmpeg.js'
 import { runRipMidi, runRvcUpscale } from '../sidecars.js'
 import { SKILLS } from '../skills/content.js'
-import type { ProjectAsset } from '../types.js'
+import type { JobError, ProjectAsset, SeparationAttempt } from '../types.js'
+
+export interface OperationProgress {
+  progress: number
+  total?: number
+  message: string
+}
+
+export interface OperationContext {
+  signal?: AbortSignal
+  onProgress?: (progress: OperationProgress) => void | Promise<void>
+}
+
+export interface OperationAnnotations {
+  title: string
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+}
 
 export interface OperationResult {
   text: string
-  data?: unknown
+  data: Record<string, unknown>
+  structuredContent: Record<string, unknown>
+  isError?: boolean
 }
 
 export interface Operation<I> {
   id: string
   description: string
   input: z.ZodType<I>
-  run: (input: I) => Promise<OperationResult>
+  outputSchema: z.ZodType
+  annotations: OperationAnnotations
+  run: (input: I, context?: OperationContext) => Promise<OperationResult>
 }
 
-function ok(data: unknown, text?: string): OperationResult {
-  return { text: text ?? JSON.stringify(data, null, 2), data }
+function ok(data: Record<string, unknown>, text?: string): OperationResult {
+  return { text: text ?? `Returned ${Object.keys(data).join(', ')}.`, data, structuredContent: data }
+}
+
+const errorSchema = z.object({
+  code: z.string(), message: z.string(), retryable: z.boolean(), nextAction: z.string(),
+  jobId: z.string().optional(), stage: z.string().optional(), httpStatus: z.number().optional()
+})
+const objectData = z.object({}).passthrough()
+const projectSchema = z.object({ id: z.string(), name: z.string(), dirName: z.string(),
+  createdAt: z.number(), updatedAt: z.number() }).passthrough()
+const trackSchema = projectSchema.extend({ projectId: z.string(), sortOrder: z.number() })
+const assetSchema = z.object({ id: z.string(), projectId: z.string(), trackId: z.string().nullable().optional(),
+  kind: z.enum(['generation', 'cover', 'track', 'master']), name: z.string(), path: z.string(),
+  origin: z.record(z.unknown()).nullable().optional(), sourceAssetId: z.string().nullable().optional(),
+  refId: z.string().nullable().optional(), favorite: z.boolean(), createdAt: z.number() }).passthrough()
+const stemSchema = z.object({ stemType: z.string(), path: z.string() }).passthrough()
+const attemptSchema = z.object({
+  routeId: z.string(), status: z.enum(['pending', 'submitting', 'accepted', 'landed', 'failed', 'uncertain']),
+  hash: z.string().optional(), deliveredStemIds: z.array(z.string()), error: errorSchema.optional(),
+  checks: objectData.optional()
+}).passthrough()
+const jobSchema = z.object({
+  jobId: z.string(), kind: z.string(), status: z.enum(['queued', 'submitting', 'waiting', 'landing',
+    'completed', 'partial', 'failed', 'cancelled', 'running', 'done', 'error']),
+  stage: z.string(), projectId: z.string(), assetIds: z.array(z.string()), stems: z.array(stemSchema),
+  lastError: errorSchema.optional(), splitAttempts: z.record(attemptSchema).optional(),
+  callResults: z.array(attemptSchema).optional(), requestedStemIds: z.array(z.string()).optional(),
+  extractedFiles: z.record(z.string()).optional(), detectedKey: z.string().nullable().optional(),
+  sourceAssetId: z.string().optional(),
+  provider: z.object({ taskId: z.string().optional(), assetId: z.string().optional(),
+    hashes: z.record(z.string()).optional(),
+    extract: z.object({ calls: z.array(objectData), callIndex: z.number() }).optional()
+  }).optional(),
+  createdAt: z.string(), updatedAt: z.string()
+}).passthrough()
+const checkSchema = z.object({
+  ok: z.boolean(), problems: z.array(z.string()), notes: z.array(z.string()),
+  metrics: z.record(z.number()), checkWindowSeconds: z.number(), limitations: z.array(z.string())
+}).passthrough()
+const routeSchema = z.object({
+  id: z.string(), label: z.string(), algorithm: z.string().nullable(), sep_type: z.string(),
+  options: z.record(z.string()), delivers: z.record(z.string()), outputKeys: z.array(z.string()),
+  checks: z.object({ family: objectData, sums: z.array(objectData) }),
+  quality: z.enum(['good', 'fair', 'rough', 'untested']), evidence: z.string(),
+  surface: z.enum(['split', 'extract group', 'extract instrument', 'extract bundle'])
+}).passthrough()
+const planSchema = z.object({
+  calls: z.array(objectData), totalCalls: z.number(), durationSeconds: z.number().nullable(),
+  durationConfidence: z.enum(['probed', 'unknown']), providerUnits: objectData, price: z.null()
+}).passthrough()
+
+const EXTRACT_SELECTION_IDS = [...new Set([
+  ...Object.keys(EXTRACT_INDIVIDUAL_STEMS),
+  ...Object.values(EXTRACT_BUNDLES).flatMap((bundle) => bundle.stems)
+])].filter((id) => !VOCAL_STEM_IDS.has(id))
+
+function separationPlan(routeIds: string[], durationSeconds: number | null, topology?: unknown[]): Record<string, unknown> {
+  const routes = listSeparationRoutes()
+  return {
+    totalCalls: routeIds.length, durationSeconds, durationConfidence: durationSeconds === null ? 'unknown' : 'probed',
+    calls: routeIds.map((id, index) => {
+      const planned = planSeparationRoute(id)
+      const call = topology?.[index] as { addOpt1?: number; addOpt2?: number } | undefined
+      const route = routes.find((route) => route.id === id)!
+      return { ...planned, topology: topology?.[index], options: { ...planned.options,
+        ...(call?.addOpt1 === undefined ? {} : { add_opt1: String(call.addOpt1) }),
+        ...(call?.addOpt2 === undefined ? {} : { add_opt2: String(call.addOpt2) }) },
+        quality: route.quality, evidence: route.evidence, checks: { family: route.family, sums: route.sums } }
+    }),
+    providerUnits: { roundedInputMinutes: durationSeconds === null ? null : Math.ceil(durationSeconds / 60),
+      processedCallMinutes: durationSeconds === null ? null : routeIds.length * Math.ceil(durationSeconds / 60),
+      premiumMinutes: null, rate: null, rateVerifiedAt: null,
+      provenance: 'Local duration probe and catalog call topology; current provider billing rate is unverified.',
+      rounding: 'Each call uses input seconds rounded up to whole minutes; chained input duration may differ.' },
+    price: null, note: 'No upload or paid call. Catalog credits are future Aurora metering, not a current provider price.'
+  }
+}
+
+// Root objects are required by MCP. The engine's additive provenance fields are preserved.
+function outputSchema(success: z.ZodType): z.ZodType {
+  return z.union([success, z.object({ error: errorSchema }).passthrough()])
+}
+
+/** One error contract for CLI and MCP; provider details are preserved when available. */
+export function operationFailure(error: unknown, jobId?: string): OperationResult {
+  const message = separationError(error).message
+  let detail: JobError
+  if (error instanceof z.ZodError) {
+    detail = { code: 'INVALID_ARGUMENT', message: error.issues.map((issue) =>
+      `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; '), retryable: false,
+      nextAction: 'Correct the named arguments using this tool\'s inputSchema and retry.' }
+  } else if (error && typeof error === 'object' && 'code' in error && 'nextAction' in error) {
+    const known = error as JobError
+    const code = ({ JOB_NOT_FOUND: 'NOT_FOUND', JOB_ID_INVALID: 'INVALID_ARGUMENT', SEPARATION_ROUTE_UNKNOWN: 'INVALID_ARGUMENT' } as Record<string, string>)[known.code] ?? known.code
+    detail = { code, message: separationError(new Error(known.message)).message, retryable: known.retryable,
+      nextAction: known.nextAction, stage: known.stage, httpStatus: known.httpStatus }
+  } else if (error instanceof Error && error.name === 'OutputIdentityError') {
+    detail = separationError(error)
+  } else {
+    const code = /not found|does not exist|no .* stem|no guide matching|missing on disk|ENOENT/i.test(message) ? 'NOT_FOUND' :
+      /(?:API_KEY|key).*?(?:missing|configured|required)|missing.*key/i.test(message) ? 'MISSING_KEY' :
+      /confirm/i.test(message) ? 'CONFIRMATION_REQUIRED' :
+      /provide|requires|unknown|nothing selected|caps at|duration|must|needs both|pass .*with/i.test(message) ? 'INVALID_ARGUMENT' : 'OPERATION_FAILED'
+    detail = { code, message, retryable: false, nextAction: code === 'NOT_FOUND' ?
+      'List the relevant projects, assets or jobs; verify local paths before retrying.' : code === 'MISSING_KEY' ?
+      'Configure the provider key with aurora keys set or the MCP environment, then retry.' :
+      code === 'CONFIRMATION_REQUIRED' ? 'Review the deletion and supply confirm:true only when authorized.' :
+      'Review the message and input schema. Check job status before repeating any paid call.' }
+  }
+  const data = { error: { ...detail, ...(jobId ? { jobId } : {}) } }
+  return { ...ok(data, `${detail.code}: ${detail.message} ${detail.nextAction}`), isError: true }
 }
 
 // Suno model surface (docs.sunoapi.org, re-verified 2026-09-14 after the v6
@@ -101,6 +237,15 @@ const DEFAULT_GEN_MODEL = DEFAULT_SUNO_MODEL
 const MODEL_DESCRIBE =
   `${SUNO_MODELS.slice(0, 3).join(' | ')} (default ${DEFAULT_GEN_MODEL}; V6_WILD = more varied/experimental, ` +
   'V6_MINI = fast/cheap draft). Deprecated but still accepted: V5_5 | V5 | V4_5PLUS | V4_5ALL | V4_5 | V4. Dots normalized'
+const varietySchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(4)
+  .optional()
+  .describe(
+    'Suno Variety: 0 Off, 1 Normal, 2 High, 3 Extra, 4 Max (provider default 1). Above 0 Suno rewrites the style per take; 0 keeps the style exactly as written'
+  )
 const durationSchema = z
   .number()
   .int()
@@ -146,20 +291,44 @@ function resolveLandingTrack(projectId: string, trackId?: string): string | null
   return trackId
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+function assertNotAborted(context?: OperationContext): void {
+  if (context?.signal?.aborted) throw Object.assign(new Error('Request cancelled; accepted provider work may still run.'), {
+    code: 'REQUEST_CANCELLED', retryable: false,
+    nextAction: 'Inspect existing jobs. Use aurora_cancel_job to durably stop further units; credits are not refunded.'
+  })
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const finish = (): void => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve() }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener('abort', finish, { once: true })
+  })
+}
 
 /** Blocking wrapper: advance the job every 5s up to ~12 min, then degrade
  *  gracefully to "still running" instead of erroring (MCP clients can time out
  *  long tool calls — the job itself is provider-side and loses nothing). */
-async function awaitJob(m: JobManifest): Promise<JobManifest> {
-  const MAX_WAIT_MS = 12 * 60 * 1000
+async function awaitJob(m: JobManifest, context?: OperationContext, waitMs = 12 * 60 * 1000): Promise<JobManifest> {
   const start = Date.now()
   let current = m
-  while (current.status === 'running' && Date.now() - start < MAX_WAIT_MS) {
-    await sleep(5000)
-    current = await advanceJob(current)
-  }
-  return current
+  let completedUnits = 0
+  const controller = new AbortController()
+  const abort = (): void => controller.abort()
+  if (context?.signal?.aborted) abort()
+  context?.signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(abort, waitMs)
+  try {
+    while (isJobActive(current) && !controller.signal.aborted && Date.now() - start < waitMs) {
+      current = await advanceJob(current, controller.signal)
+      completedUnits = Math.max(completedUnits, Object.values(current.landed).filter(Boolean).length,
+        current.provider.extract?.callIndex ?? 0)
+      await context?.onProgress?.({ progress: completedUnits, message: `${current.jobId}: ${current.status} — ${current.stage}` })
+      if (isJobActive(current)) await sleep(Math.min(current.pollIntervalMs ?? 5000, Math.max(0, waitMs - (Date.now() - start))), controller.signal)
+    }
+    return current
+  } finally { clearTimeout(timer); context?.signal?.removeEventListener('abort', abort) }
 }
 
 function jobSummary(m: JobManifest): Record<string, unknown> {
@@ -168,10 +337,25 @@ function jobSummary(m: JobManifest): Record<string, unknown> {
     kind: m.kind,
     status: m.status,
     stage: m.stage,
-    error: m.error,
+    lastError: m.lastError ?? (m.error ? { code: 'JOB_FAILED', message: m.error, retryable: false,
+      nextAction: 'Inspect the job and existing outputs before starting replacement paid work.' } : undefined),
     projectId: m.projectId,
     assetIds: m.assetIds,
     stems: m.stems,
+    splitAttempts: m.provider.splitAttempts,
+    callResults: m.provider.extract?.callResults,
+    requestedStemIds: m.provider.extract?.requestedStemIds,
+    extractedFiles: m.provider.extract?.extractedFiles,
+    detectedKey: m.provider.extract?.detectedKey,
+    sourceAssetId: m.provider.assetId,
+    // Provider ids and the extraction plan only: the attempts and results are reported once, above.
+    provider: {
+      taskId: m.provider.taskId, assetId: m.provider.assetId, hashes: m.provider.hashes,
+      extract: m.provider.extract ? { calls: m.provider.extract.calls, callIndex: m.provider.extract.callIndex } : undefined
+    },
+    failures: m.provider.extract?.failures,
+    cancelRequestedAt: m.cancelRequestedAt,
+    duplicateOf: m.duplicateOf,
     streamUrls: m.streamUrls && m.streamUrls.length > 0 ? m.streamUrls : undefined,
     lastProviderStatus: m.lastStatus,
     createdAt: m.createdAt,
@@ -180,17 +364,19 @@ function jobSummary(m: JobManifest): Record<string, unknown> {
 }
 
 function jobText(m: JobManifest): string {
-  if (m.status === 'done') {
+  if (m.status === 'done' || m.status === 'completed') {
     const assets = m.assetIds.length > 0 ? ` ${m.assetIds.length} asset(s): ${m.assetIds.join(', ')}.` : ''
     const stems = m.stems.length > 0 ? ` ${m.stems.length} stem(s) landed.` : ''
     return `Job ${m.jobId} complete.${assets}${stems} Files are on disk in the project folder.`
   }
-  if (m.status === 'error') return `Job ${m.jobId} FAILED: ${m.error}`
+  if (m.status === 'error' || m.status === 'failed') return `Job ${m.jobId} FAILED: ${m.lastError?.message ?? m.error}`
+  if (m.status === 'partial') return `Job ${m.jobId} partially completed: successful outputs are retained. ${m.lastError?.message ?? m.error ?? ''} Inspect callResults and check saved outputs before authorizing new paid work.`
+  if (m.status === 'cancelled') return `Job ${m.jobId} cancelled. Saved outputs stay; already submitted provider work may still run and is not refunded.`
   const stream =
     m.streamUrls && m.streamUrls.length > 0
       ? ` Stream preview available NOW (play these URLs for the user before files land): ${m.streamUrls.join(' , ')}`
       : ''
-  return `Job ${m.jobId} still running — ${m.stage}.${stream} Poll aurora_get_job_status again in 10-20s.`
+  return `Job ${m.jobId} ${m.status} — ${m.stage}.${stream} Advance with aurora_get_job_status; it may submit paid calls and land files.`
 }
 
 async function resolveProjectOrCreate(projectId: string | undefined, fallbackName: string): Promise<string> {
@@ -229,28 +415,33 @@ function resolveAudioInput(input: { assetId?: string; path?: string }): {
 
 const getCredits: Operation<Record<string, never>> = {
   id: 'aurora_get_credits',
-  description:
-    'Cloud balances: Suno provider credits (sunoapi.org/kie.ai) and MVSEP premium minutes. ' +
-    'FREE call — run it before any paid generation or split, and after, to log real spend.',
+  annotations: { title: 'Cloud credit balances', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  outputSchema: outputSchema(z.object({ sunoCredits: z.number().optional(), sunoError: errorSchema.optional(), mvsepPremiumMinutes: z.number().nullable().optional(), mvsepError: errorSchema.optional() }).passthrough()),
+  description: "Free cloud balance read: returns Suno credits and MVSEP premium minutes or per-provider diagnostics, with no generation spend. No inputs. Requires configured provider keys and network access. Read before authorizing paid work and again afterward to measure real spend.",
   input: z.object({}).strict(),
-  async run() {
+  async run(_input, context) {
     const result: Record<string, unknown> = {}
     try {
       result.sunoCredits = await getRemainingCredits()
       result.sunoProvider = host()
     } catch (err) {
-      result.sunoError = err instanceof Error ? err.message : String(err)
+      result.sunoError = operationFailure(err).structuredContent.error
     }
+    assertNotAborted(context)
     if (getMvsepKey()) {
       try {
         const info = await getMvsepUserInfo()
         result.mvsepPremiumMinutes = info.premiumMinutes
         result.mvsepPremiumEnabled = info.premiumEnabled
       } catch (err) {
-        result.mvsepError = err instanceof Error ? err.message : String(err)
+        result.mvsepError = operationFailure(err).structuredContent.error
       }
     } else {
-      result.mvsepError = 'MVSEP_API_KEY not configured'
+      result.mvsepError = operationFailure(new Error('MVSEP_API_KEY not configured')).structuredContent.error
+    }
+    if (result.sunoError || result.mvsepError) {
+      const failure = result.sunoError ?? result.mvsepError
+      return { ...ok({ ...result, error: failure }, 'Some balances were unavailable; inspect provider diagnostics.'), isError: true }
     }
     return ok(result)
   }
@@ -258,11 +449,11 @@ const getCredits: Operation<Record<string, never>> = {
 
 const getWorkspaceState: Operation<{ projectId?: string }> = {
   id: 'aurora_get_workspace_state',
-  description:
-    "Snapshot of the user's Aurora workspace: userData location, projects root, key status, " +
-    'projects list, optional per-project assets+stems. Call once at the start of a session.',
+  annotations: { title: 'Workspace snapshot', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ userData: z.string(), database: z.string(), projectsRoot: z.string(), keys: objectData, projects: z.array(projectSchema), activeProject: objectData.optional() })),
+  description: "Free local workspace snapshot: returns paths, key-presence flags and projects; optional projectId adds that project's tracks, assets and split stems. Does not upload audio or reveal keys. Call at session start, then list assets or routes before planning paid work.",
   input: z.object({ projectId: z.string().optional() }),
-  async run(input) {
+  async run(input, context) {
     const projects = listProjects()
     let activeProject: unknown
     if (input.projectId) {
@@ -294,9 +485,11 @@ const getWorkspaceState: Operation<{ projectId?: string }> = {
 
 const createProjectOp: Operation<{ name: string }> = {
   id: 'aurora_create_project',
-  description: 'Create a new Aurora project (a container of audio assets, with a human-readable folder on disk).',
+  annotations: { title: 'Create project', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ project: projectSchema, directory: z.string() })),
+  description: "Free local write: create a project and folder from required name. Returns project id and directory. List tracks or import/generate assets into the returned project; repeating creates another project.",
   input: z.object({ name: z.string().min(1).describe('Project name, e.g. "Midnight Drive"') }),
-  async run(input) {
+  async run(input, context) {
     const project = await createProject(input.name)
     return ok({ project, directory: getProjectDirectory(project.id) })
   }
@@ -304,7 +497,9 @@ const createProjectOp: Operation<{ name: string }> = {
 
 const listProjectsOp: Operation<Record<string, never>> = {
   id: 'aurora_list_projects',
-  description: 'List every Aurora project (id, name, folder name, timestamps), newest first.',
+  annotations: { title: 'List projects', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ projects: z.array(projectSchema), projectsRoot: z.string() })),
+  description: "Free local read, no inputs: returns every project with ids, names and timestamps plus projectsRoot. Nothing uploads. Use a returned projectId with aurora_list_assets or aurora_list_tracks.",
   input: z.object({}).strict(),
   async run() {
     return ok({ projects: listProjects(), projectsRoot: getProjectsDirectory() })
@@ -313,32 +508,28 @@ const listProjectsOp: Operation<Record<string, never>> = {
 
 const renameProjectOp: Operation<{ projectId: string; name: string }> = {
   id: 'aurora_rename_project',
-  description: 'Rename a project (display name only — the on-disk folder keeps its name).',
+  annotations: { title: 'Rename project', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ project: projectSchema })),
+  description: "Free local write: set the display name of projectId to name; folder name stays the same. Returns the updated project. Repeatable with the same name. Verify with aurora_list_projects.",
   input: z.object({ projectId: z.string(), name: z.string().min(1) }),
-  async run(input) {
+  async run(input, context) {
     return ok({ project: renameProject(input.projectId, input.name) })
   }
 }
 
 const deleteProjectOp: Operation<{ projectId: string; confirm?: boolean }> = {
   id: 'aurora_delete_project',
-  description:
-    'DELETE a project: its DB rows AND its entire folder on disk (all audio files). Irreversible. ' +
-    'Requires confirm:true — ask the user first.',
+  annotations: { title: 'Delete project and files', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ deleted: z.string() })),
+  description: "Free destructive local write: projectId and confirm:true remove its rows and entire audio folder. Without confirmation returns CONFIRMATION_REQUIRED. Returns deleted id. Review aurora_list_assets before authorizing this irreversible deletion.",
   input: z.object({
     projectId: z.string(),
     confirm: z.boolean().optional().describe('Must be true. Confirm with the user before calling.')
   }),
-  async run(input) {
+  async run(input, context) {
     const project = getProject(input.projectId)
     if (!project) throw new Error(`Project not found: ${input.projectId}`)
-    if (!input.confirm) {
-      return ok(
-        { wouldDelete: { project, directory: getProjectDirectory(project.id) } },
-        `NOT deleted. This would remove project "${project.name}" and its entire folder ` +
-          `${getProjectDirectory(project.id)} from disk. Re-call with confirm:true after the user agrees.`
-      )
-    }
+    if (!input.confirm) throw new Error(`Confirmation required: confirm:true deletes project "${project.name}" and its folder ${getProjectDirectory(project.id)}.`)
     await deleteProject(input.projectId)
     return ok({ deleted: project.id }, `Deleted project "${project.name}" and its folder.`)
   }
@@ -346,11 +537,11 @@ const deleteProjectOp: Operation<{ projectId: string; confirm?: boolean }> = {
 
 const listAssetsOp: Operation<{ projectId: string }> = {
   id: 'aurora_list_assets',
-  description:
-    'All assets in a project (generations, covers, imports, references, masters) with their on-disk ' +
-    'paths, plus every split stem grouped by source asset.',
+  annotations: { title: 'List assets and split stems', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ project: projectSchema, directory: z.string(), assets: z.array(assetSchema) })),
+  description: "Free local read: required projectId returns project, directory and assets with stored provider ids, paths and seven-stem split rows. Nothing uploads. Reuse existing outputs; choose assetId for a free separation estimate before paid extraction or split.",
   input: z.object({ projectId: z.string() }),
-  async run(input) {
+  async run(input, context) {
     const project = getProject(input.projectId)
     if (!project) throw new Error(`Project not found: ${input.projectId}`)
     const assets = listAssets(input.projectId)
@@ -371,15 +562,14 @@ const listAssetsOp: Operation<{ projectId: string }> = {
 
 const createTrackOp: Operation<{ projectId: string; name: string }> = {
   id: 'aurora_create_track',
-  description:
-    'Create a track inside a project — a real on-disk subfolder (one per song in a multi-track ' +
-    'release, e.g. each cue of a soundtrack). Assets filed to a track nest under ' +
-    '<project>/<track-slug>/; unfiled assets stay at the project root.',
+  annotations: { title: 'Create track folder', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ track: trackSchema, directory: z.string() })),
+  description: "Free local write: required projectId and name create a track subfolder for organizing songs. Returns track id and directory. Repeating creates another track. Use trackId for import/generation landing or aurora_set_asset_track.",
   input: z.object({
     projectId: z.string(),
     name: z.string().min(1).describe('Track name, e.g. "Main Theme"')
   }),
-  async run(input) {
+  async run(input, context) {
     const track = await createTrack(input.projectId, input.name)
     return ok({ track, directory: getTrackDirectory(track.id) })
   }
@@ -387,11 +577,11 @@ const createTrackOp: Operation<{ projectId: string; name: string }> = {
 
 const listTracksOp: Operation<{ projectId: string }> = {
   id: 'aurora_list_tracks',
-  description:
-    'List the tracks (subfolders) of a project with per-track asset counts. Assets with trackId ' +
-    'null are unfiled (project root).',
+  annotations: { title: 'List track folders', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ project: objectData, tracks: z.array(trackSchema), unfiledCount: z.number() })),
+  description: "Free local read: required projectId returns track ids, directories, per-track asset counts and unfiledCount. Nothing uploads. Use trackId for landing new assets or aurora_set_asset_track.",
   input: z.object({ projectId: z.string() }),
-  async run(input) {
+  async run(input, context) {
     const project = getProject(input.projectId)
     if (!project) throw new Error(`Project not found: ${input.projectId}`)
     const tracks = listTracks(input.projectId)
@@ -415,9 +605,11 @@ const listTracksOp: Operation<{ projectId: string }> = {
 
 const renameTrackOp: Operation<{ trackId: string; name: string }> = {
   id: 'aurora_rename_track',
-  description: 'Rename a track (display name only — the on-disk subfolder keeps its slug).',
+  annotations: { title: 'Rename track', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ track: trackSchema })),
+  description: "Free local write: required trackId and name change its display name, retaining the folder slug. Returns updated track. Repeatable with the same name. Verify with aurora_list_tracks.",
   input: z.object({ trackId: z.string(), name: z.string().min(1) }),
-  async run(input) {
+  async run(input, context) {
     if (!getTrack(input.trackId)) throw new Error(`Track not found: ${input.trackId}`)
     return ok({ track: renameTrack(input.trackId, input.name) })
   }
@@ -425,11 +617,11 @@ const renameTrackOp: Operation<{ trackId: string; name: string }> = {
 
 const deleteTrackOp: Operation<{ trackId: string }> = {
   id: 'aurora_delete_track',
-  description:
-    'Delete a track NON-destructively: every asset filed to it moves back to the project root ' +
-    '(files relocate on disk, nothing is deleted), then the empty subfolder is removed.',
+  annotations: { title: 'Delete track folder and unfile assets', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ deleted: z.string() })),
+  description: "Free local write: required trackId removes the track and moves its assets, stems and references to the project root; audio is retained. Returns deleted id. No provider calls. List tracks/assets afterward to inspect their new locations.",
   input: z.object({ trackId: z.string() }),
-  async run(input) {
+  async run(input, context) {
     const track = getTrack(input.trackId)
     if (!track) throw new Error(`Track not found: ${input.trackId}`)
     await deleteTrack(input.trackId)
@@ -442,9 +634,9 @@ const deleteTrackOp: Operation<{ trackId: string }> = {
 
 const setAssetTrackOp: Operation<{ assetId: string; trackId: string | null }> = {
   id: 'aurora_set_asset_track',
-  description:
-    'File an asset to a track (or null = unfiled / project root). Physically moves the audio file ' +
-    'plus its stems/ and extracts/ folders into the track subfolder and rewrites stored paths.',
+  annotations: { title: 'Move asset to track', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ asset: assetSchema })),
+  description: "Free local write: required assetId and nullable trackId physically move audio, split/extracted stems and linked reference paths; null unfiles to the project root. Returns updated asset. Repeating the same target is safe. List tracks first and assets afterward.",
   input: z.object({
     assetId: z.string(),
     trackId: z
@@ -452,7 +644,7 @@ const setAssetTrackOp: Operation<{ assetId: string; trackId: string | null }> = 
       .nullable()
       .describe('Target track id, or null to move the asset back to the project root')
   }),
-  async run(input) {
+  async run(input, context) {
     const asset = await setAssetTrack(input.assetId, input.trackId)
     return ok({ asset })
   }
@@ -460,10 +652,11 @@ const setAssetTrackOp: Operation<{ assetId: string; trackId: string | null }> = 
 
 const favoriteAssetOp: Operation<{ assetId: string; favorite: boolean }> = {
   id: 'aurora_favorite_asset',
-  description:
-    "Set or clear an asset's persisted favorite flag (the Library's favorites-only filter keys off it).",
+  annotations: { title: 'Set asset favorite', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ asset: assetSchema })),
+  description: "Free local write: required assetId and favorite boolean set or clear the library favorite flag. Returns updated asset. Repeatable with the same flag; inspect aurora_list_assets afterward.",
   input: z.object({ assetId: z.string(), favorite: z.boolean() }),
-  async run(input) {
+  async run(input, context) {
     const asset = setAssetFavorite(input.assetId, input.favorite)
     return ok({ asset })
   }
@@ -473,15 +666,15 @@ const favoriteAssetOp: Operation<{ assetId: string; favorite: boolean }> = {
 
 const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
   id: 'aurora_import_file',
-  description:
-    "Copy an external audio file into a project as a 'track' asset (lands in <project>/tracks/, " +
-    "or the track's tracks/ if trackId is given). Any asset can then be split, covered, or pitch-shifted.",
+  annotations: { title: 'Import local audio', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ asset: assetSchema })),
+  description: "Free local write: required projectId and absolute filePath copy audio into the library; optional trackId lands in that track, otherwise project root. Returns a new track asset id/path. Repeating duplicates the import. List assets, then estimate separation or explicitly authorize paid generation.",
   input: z.object({
     projectId: z.string(),
     trackId: z.string().optional().describe('File the track into this track subfolder'),
     filePath: z.string().describe('Absolute path to the audio file to import')
   }),
-  async run(input) {
+  async run(input, context) {
     if (!existsSync(input.filePath)) throw new Error(`File not found: ${input.filePath}`)
     const asset = await addFileAsset({
       projectId: input.projectId,
@@ -494,16 +687,15 @@ const importFileOp: Operation<{ projectId: string; trackId?: string; filePath: s
 
 const addReferenceOp: Operation<{ projectId: string; trackId?: string; filePath: string }> = {
   id: 'aurora_add_reference',
-  description:
-    "Copy an audio file into a project as a 'track' asset AND register it in the global reference " +
-    'library (the curve cache the mastering flow keys off), so it can be reused as a match target ' +
-    'across projects. The opt-in "save as reusable reference" path — a plain import is aurora_import_file.',
+  annotations: { title: 'Import reusable reference', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ asset: assetSchema })),
+  description: "Free local write: projectId and absolute filePath import a new audio asset and register it as a reusable mastering reference; optional trackId selects a subfolder, otherwise root. Returns linked asset. No upload or credit spend. Use the app mastering flow or aurora_list_assets next.",
   input: z.object({
     projectId: z.string(),
     trackId: z.string().optional().describe('File the track into this track subfolder'),
     filePath: z.string().describe('Absolute path to the reference audio file')
   }),
-  async run(input) {
+  async run(input, context) {
     if (!existsSync(input.filePath)) throw new Error(`File not found: ${input.filePath}`)
     const asset = await addFileAsset({
       projectId: input.projectId,
@@ -519,23 +711,17 @@ const addReferenceOp: Operation<{ projectId: string; trackId?: string; filePath:
 
 const deleteAssetOp: Operation<{ assetId: string; confirm?: boolean }> = {
   id: 'aurora_delete_asset',
-  description:
-    'DELETE an asset: its DB row, its audio file on disk, its stems folder, and any linked reference ' +
-    'row. Irreversible. Requires confirm:true — ask the user first.',
+  annotations: { title: 'Delete asset and files', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ deleted: z.string() })),
+  description: "Free destructive local write: assetId and confirm:true delete its row, audio, stems and linked reference. Without confirmation returns CONFIRMATION_REQUIRED. Returns deleted id. Inspect paths via aurora_list_assets before authorizing irreversible deletion.",
   input: z.object({
     assetId: z.string(),
     confirm: z.boolean().optional().describe('Must be true. Confirm with the user before calling.')
   }),
-  async run(input) {
+  async run(input, context) {
     const asset = getAsset(input.assetId)
     if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
-    if (!input.confirm) {
-      return ok(
-        { wouldDelete: asset },
-        `NOT deleted. This would remove "${asset.name}" (${asset.path}) and its stems from disk. ` +
-          'Re-call with confirm:true after the user agrees.'
-      )
-    }
+    if (!input.confirm) throw new Error(`Confirmation required: confirm:true deletes asset "${asset.name}", ${asset.path}, its stems and linked reference.`)
     await deleteAsset(input.assetId)
     return ok({ deleted: asset.id }, `Deleted asset "${asset.name}".`)
   }
@@ -543,11 +729,11 @@ const deleteAssetOp: Operation<{ assetId: string; confirm?: boolean }> = {
 
 const fetchWavOp: Operation<{ assetId: string }> = {
   id: 'aurora_fetch_wav',
-  description:
-    'Upgrade a generation/cover asset from MP3 to provider WAV (uses the taskId+audioId stored at ' +
-    'generation time; ~0.4 Suno credits per conversion). The asset re-points at the WAV; the MP3 stays on disk.',
+  annotations: { title: 'Fetch provider WAV', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(z.object({ asset: assetSchema })),
+  description: "PAID Suno conversion: required assetId must contain provider taskId/audioId. Requests and downloads provider WAV, then updates asset path while retaining MP3. Returns updated asset. No source re-upload. For a free local format conversion use aurora_convert; inspect aurora_list_assets afterward.",
   input: z.object({ assetId: z.string() }),
-  async run(input) {
+  async run(input, context) {
     const asset = getAsset(input.assetId)
     if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
     const origin = (asset.origin ?? {}) as { taskId?: string; audioId?: string | null }
@@ -557,9 +743,12 @@ const fetchWavOp: Operation<{ assetId: string }> = {
           'legacy generation) — the provider WAV conversion needs both. Use aurora_convert for a local ffmpeg WAV instead.'
       )
     }
+    assertNotAborted(context)
     const wavTaskId = await createWavConversion(origin.taskId, origin.audioId)
+    assertNotAborted(context)
     const wavUrl = await pollWavConversion(wavTaskId)
     const wavPath = join(dirname(asset.path), `${basename(asset.path, extname(asset.path))}.wav`)
+    assertNotAborted(context)
     await downloadTo(wavUrl, wavPath)
     const updated = updateAssetPath(asset.id, wavPath)
     return ok({ asset: updated }, `WAV fetched: ${wavPath} (asset re-pointed; MP3 kept on disk).`)
@@ -605,6 +794,7 @@ const generateOp: Operation<{
   instrumental?: boolean
   model?: string
   duration?: number
+  variety?: number
   vocalGender?: 'male' | 'female'
   negativeTags?: string
   styleWeight?: number
@@ -617,12 +807,9 @@ const generateOp: Operation<{
   background?: boolean
 }> = {
   id: 'aurora_generate',
-  description:
-    'Generate a full music track via Suno (2 variations land as project assets, MP3 + WAV-upgradeable). ' +
-    'ULTRA-CUSTOM by default: in custom mode (style + title set) the prompt is the EXACT sung lyrics — ' +
-    'write real lyrics with section metatags like [Verse]/[Chorus]/[Choir]. Takes 1-3 minutes. ' +
-    'PAID (Suno credits) — check aurora_get_credits first. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Generate music', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno music generation from prompt. Optional style/title enable custom mode; instrumental defaults false, model uses the provider default, variety uses provider default when omitted. Optional projectId/trackId choose landing, otherwise creates a project. background defaults false: wait with progress; true returns a durable job. Returns job state, asset ids and preview URLs. Advance aurora_get_job_status; do not repeat paid submissions to poll.",
   input: z.object({
     prompt: z
       .string()
@@ -645,6 +832,7 @@ const generateOp: Operation<{
     instrumental: z.boolean().optional().describe('Generate without vocals (default false)'),
     model: z.string().optional().describe(MODEL_DESCRIBE),
     duration: durationSchema,
+    variety: varietySchema,
     vocalGender: z.enum(['male', 'female']).optional(),
     negativeTags: z
       .string()
@@ -659,7 +847,7 @@ const generateOp: Operation<{
     trackId: landingTrackIdSchema,
     background: z.boolean().optional().describe('Return a jobId immediately instead of waiting')
   }),
-  async run(input) {
+  async run(input, context) {
     const customMode = input.customMode ?? Boolean(input.style || input.title)
     if (customMode && (!input.style || !input.title)) {
       throw new Error('Custom mode requires BOTH style and title (lyrics go in prompt).')
@@ -675,6 +863,7 @@ const generateOp: Operation<{
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
 
+    assertNotAborted(context)
     const taskId = await createGeneration({
       prompt: input.prompt,
       style: input.style,
@@ -683,6 +872,7 @@ const generateOp: Operation<{
       customMode,
       model,
       duration: input.duration,
+      variety: input.variety,
       vocalGender: input.vocalGender,
       negativeTags: input.negativeTags,
       styleWeight: input.styleWeight,
@@ -705,6 +895,7 @@ const generateOp: Operation<{
         instrumental: input.instrumental ?? false,
         model,
         duration: input.duration,
+        variety: input.variety,
         vocalGender: input.vocalGender ?? null,
         negativeTags: input.negativeTags,
         styleWeight: input.styleWeight,
@@ -721,7 +912,7 @@ const generateOp: Operation<{
     if (input.background) {
       return ok(jobSummary(manifest), jobText(manifest))
     }
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
     return ok(jobSummary(finished), jobText(finished))
   }
 }
@@ -738,10 +929,9 @@ const soundsOp: Operation<{
   background?: boolean
 }> = {
   id: 'aurora_sounds',
-  description:
-    'Generate a sample / one-shot / loop via Suno Sounds (key + tempo lockable; 2 variations land as ' +
-    'project assets). Fast (~20-30s) and cheap (~2.5 Suno credits). sunoapi.org only. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Generate sound', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno sound generation from required prompt. Optional model uses provider default; projectId/trackId choose landing, otherwise creates a project. background defaults false: wait with progress; true returns a durable job. Returns job state and downloaded asset ids. Advance aurora_get_job_status, then list assets.",
   input: z.object({
     prompt: z.string().max(500).describe('Sound description, e.g. "huge cinematic braam, dark low brass"'),
     soundKey: z.string().optional().describe('Pitch lock: C..B major or Cm..Bm minor, sharps as C# (default Any)'),
@@ -753,12 +943,13 @@ const soundsOp: Operation<{
     trackId: landingTrackIdSchema,
     background: z.boolean().optional()
   }),
-  async run(input) {
+  async run(input, context) {
     const baseName = input.prompt.slice(0, 60).trim() || 'Sound'
     const projectId = await resolveProjectOrCreate(input.projectId, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
     const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
 
+    assertNotAborted(context)
     const taskId = await createSoundsGeneration({
       prompt: input.prompt,
       soundKey: input.soundKey,
@@ -790,7 +981,7 @@ const soundsOp: Operation<{
     if (input.background) {
       return ok(jobSummary(manifest), jobText(manifest))
     }
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
     return ok(jobSummary(finished), jobText(finished))
   }
 }
@@ -843,6 +1034,7 @@ const coverOp: Operation<{
   instrumental?: boolean
   model?: string
   duration?: number
+  variety?: number
   vocalGender?: 'male' | 'female'
   negativeTags?: string
   audioWeight?: number
@@ -856,15 +1048,9 @@ const coverOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_cover',
-  description:
-    'Cover a track (Suno upload-and-cover style transform): same musical content, new style. Source is a ' +
-    'project asset or an external file (max 8 minutes). COVERS RE-RENDER EVERYTHING in the reference — to ' +
-    'generate one complementary layer (e.g. a choir part), feed a stripped stem or bare melody render of ONLY ' +
-    'the line to perform, NOT the full mix (full mix in = a choir performing your drums). Layering settings ' +
-    'that lock structure while swapping timbre: audioWeight 0.7-0.85, styleWeight 0.55-0.75, ' +
-    'weirdnessConstraint 0.2-0.4. 2 variations land as cover assets linked to the source. ' +
-    'PAID (Suno credits + ~0.4/WAV; 12 cr/gen was the V5_5 figure, v6 unobserved) — check aurora_get_credits first. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Cover uploaded audio', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno cover: provide sourceAssetId or sourcePath plus prompt; uploads audio (8-minute cap), style/title enable custom mode, model uses provider default, instrumental defaults false. Suno's own recordings may be refused by upload; use extend/replace_section id routes for those. Optional projectId/trackId select landing. background defaults false with best-effort paid WAV fetch enabled; true lands MP3 only. Returns job/assets and WAV notes. Advance aurora_get_job_status or retry WAV via aurora_fetch_wav.",
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to transform'),
     sourcePath: z.string().optional().describe('OR an external audio file path'),
@@ -878,6 +1064,7 @@ const coverOp: Operation<{
     instrumental: z.boolean().optional(),
     model: z.string().optional().describe(`${MODEL_DESCRIBE}. V4_5ALL caps input at 1 min`),
     duration: durationSchema,
+    variety: varietySchema,
     vocalGender: z.enum(['male', 'female']).optional(),
     negativeTags: z.string().optional().describe('Styles/instruments to exclude, ONE comma-separated string'),
     audioWeight: z.number().min(0).max(1).optional().describe('0..1 — 0 = new style dominates, 1 = stay close to the source. 0.7-0.85 = structure locked, timbre swapped'),
@@ -893,7 +1080,7 @@ const coverOp: Operation<{
       .optional()
       .describe('Blocking mode only: also fetch the provider WAV per variation (default true; ~0.4 credits each)')
   }),
-  async run(input) {
+  async run(input, context) {
     const sourceAsset = input.sourceAssetId ? getAsset(input.sourceAssetId) : null
     if (input.sourceAssetId && !sourceAsset) throw new Error(`Asset not found: ${input.sourceAssetId}`)
     const sourcePath = sourceAsset?.path ?? input.sourcePath
@@ -920,7 +1107,9 @@ const coverOp: Operation<{
     const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
 
     const trackId = resolveLandingTrack(projectId, input.trackId)
+    assertNotAborted(context)
     const uploadUrl = await uploadSourceAudio(sourcePath)
+    assertNotAborted(context)
     const taskId = await createCover({
       uploadUrl,
       prompt: input.prompt,
@@ -930,6 +1119,7 @@ const coverOp: Operation<{
       customMode,
       model,
       duration: input.duration,
+      variety: input.variety,
       vocalGender: input.vocalGender,
       negativeTags: input.negativeTags,
       audioWeight: input.audioWeight,
@@ -952,6 +1142,7 @@ const coverOp: Operation<{
         instrumental: input.instrumental ?? false,
         model,
         duration: input.duration,
+        variety: input.variety,
         vocalGender: input.vocalGender ?? null,
         negativeTags: input.negativeTags,
         audioWeight: input.audioWeight,
@@ -969,14 +1160,15 @@ const coverOp: Operation<{
       return ok(jobSummary(manifest), jobText(manifest))
     }
 
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
 
     // Blocking-mode WAV stage (mirrors the app's runCover best-effort WAVs).
     const wavNotes: string[] = []
-    if (finished.status === 'done' && (input.fetchWav ?? true)) {
+    if ((finished.status === 'done' || finished.status === 'completed') && (input.fetchWav ?? true)) {
       for (const assetId of finished.assetIds) {
         try {
-          await fetchWavOp.run({ assetId })
+          assertNotAborted(context)
+          await fetchWavOp.run({ assetId }, context)
           wavNotes.push(`${assetId}: WAV fetched`)
         } catch (err) {
           wavNotes.push(`${assetId}: WAV failed (${err instanceof Error ? err.message : err}) — MP3 kept; retry with aurora_fetch_wav`)
@@ -1007,14 +1199,9 @@ const addVocalsOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_add_vocals',
-  description:
-    'Layer AI vocals ON TOP of an instrumental (Suno add-vocals): upload a track, get vocals performed ' +
-    'against its tempo/key/changes. THE op for adding a choir or vocal part to an existing production: ' +
-    'feed a SIMPLIFIED bounce (harmonic skeleton + the melody to relate to — strip drums/dense ornament), ' +
-    'audioWeight 0.7-0.85, choir-steering style + negativeTags, then aurora_split the result and keep ONLY ' +
-    'the vocals stem to lay over the real production. Output is a full mix; the vocal stem is the deliverable. ' +
-    'PAID (Suno credits) — check aurora_get_credits first. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Add generated vocals', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno vocals over uploaded instrumental: sourceAssetId or sourcePath, prompt, style, title and negativeTags are required; optional model/controls refine the result. Project defaults to the source project or a new project for file input; trackId defaults to the project root. background defaults false; true returns a durable job. Blocking fetchWav defaults true and adds conversion spend. Returns job, asset ids and WAV notes. Advance aurora_get_job_status; inspect assets afterward.",
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to sing over'),
     sourcePath: z.string().optional().describe('OR an external audio file path'),
@@ -1038,14 +1225,16 @@ const addVocalsOp: Operation<{
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: also fetch the provider WAV per variation (default true)')
   }),
-  async run(input) {
+  async run(input, context) {
     const { sourcePath, sourceAsset } = resolveSourcePath(input)
     const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
     const baseName = input.title.trim() || `${basename(sourcePath, extname(sourcePath))} vocals`
     const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
 
     const trackId = resolveLandingTrack(projectId, input.trackId)
+    assertNotAborted(context)
     const uploadUrl = await uploadSourceAudio(sourcePath)
+    assertNotAborted(context)
     const taskId = await createAddVocals({
       uploadUrl,
       prompt: input.prompt,
@@ -1085,13 +1274,14 @@ const addVocalsOp: Operation<{
     if (input.background) {
       return ok(jobSummary(manifest), jobText(manifest))
     }
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
 
     const wavNotes: string[] = []
-    if (finished.status === 'done' && (input.fetchWav ?? true)) {
+    if ((finished.status === 'done' || finished.status === 'completed') && (input.fetchWav ?? true)) {
       for (const assetId of finished.assetIds) {
         try {
-          await fetchWavOp.run({ assetId })
+          assertNotAborted(context)
+          await fetchWavOp.run({ assetId }, context)
           wavNotes.push(`${assetId}: WAV fetched`)
         } catch (err) {
           wavNotes.push(`${assetId}: WAV failed (${err instanceof Error ? err.message : err}) — MP3 kept; retry with aurora_fetch_wav`)
@@ -1103,7 +1293,7 @@ const addVocalsOp: Operation<{
     return ok(
       summary,
       `${jobText(finished)}${wavNotes.length > 0 ? ` WAV stage: ${wavNotes.join('; ')}` : ''}` +
-        (finished.status === 'done'
+        ((finished.status === 'done' || finished.status === 'completed')
           ? ' Next for layering: aurora_split the result and keep the vocals stem.'
           : '')
     )
@@ -1127,12 +1317,9 @@ const addInstrumentalOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_add_instrumental',
-  description:
-    'Generate backing instrumentation complementary to an uploaded audio (Suno add-instrumental — the ' +
-    'inverse of aurora_add_vocals; input is usually a vocal or a melodic stem). Output is a full mix ' +
-    'conditioned on the upload; split it to extract the new layers. PAID (Suno credits) — check ' +
-    'aurora_get_credits first. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Add generated instrumental', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno accompaniment for uploaded vocals: sourceAssetId or sourcePath plus required tags, title and negativeTags; optional model/controls refine it. Project defaults to the source project or a new project for file input; trackId defaults to the project root. background defaults false; true returns a durable job. fetchWav defaults true and adds conversion spend in blocking mode. Returns job, downloaded assets and WAV notes. Advance aurora_get_job_status next.",
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to build instrumentation around'),
     sourcePath: z.string().optional().describe('OR an external audio file path'),
@@ -1151,14 +1338,16 @@ const addInstrumentalOp: Operation<{
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: also fetch the provider WAV per variation (default true)')
   }),
-  async run(input) {
+  async run(input, context) {
     const { sourcePath, sourceAsset } = resolveSourcePath(input)
     const model = normalizeModel(input.model, DEFAULT_GEN_MODEL)
     const baseName = input.title.trim() || `${basename(sourcePath, extname(sourcePath))} instrumental`
     const projectId = await resolveDerivedProject(input.projectId, sourceAsset, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
 
+    assertNotAborted(context)
     const uploadUrl = await uploadSourceAudio(sourcePath)
+    assertNotAborted(context)
     const taskId = await createAddInstrumental({
       uploadUrl,
       title: input.title,
@@ -1196,13 +1385,14 @@ const addInstrumentalOp: Operation<{
     if (input.background) {
       return ok(jobSummary(manifest), jobText(manifest))
     }
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
 
     const wavNotes: string[] = []
-    if (finished.status === 'done' && (input.fetchWav ?? true)) {
+    if ((finished.status === 'done' || finished.status === 'completed') && (input.fetchWav ?? true)) {
       for (const assetId of finished.assetIds) {
         try {
-          await fetchWavOp.run({ assetId })
+          assertNotAborted(context)
+          await fetchWavOp.run({ assetId }, context)
           wavNotes.push(`${assetId}: WAV fetched`)
         } catch (err) {
           wavNotes.push(`${assetId}: WAV failed (${err instanceof Error ? err.message : err}) — MP3 kept; retry with aurora_fetch_wav`)
@@ -1223,15 +1413,17 @@ const addInstrumentalOp: Operation<{
  *  summary text. */
 async function finishDerivedJob(
   manifest: JobManifest,
-  input: { background?: boolean; fetchWav?: boolean }
+  input: { background?: boolean; fetchWav?: boolean },
+  context?: OperationContext
 ): Promise<OperationResult> {
   if (input.background) return ok(jobSummary(manifest), jobText(manifest))
-  const finished = await awaitJob(manifest)
+  const finished = await awaitJob(manifest, context)
   const wavNotes: string[] = []
-  if (finished.status === 'done' && (input.fetchWav ?? false)) {
+  if ((finished.status === 'done' || finished.status === 'completed') && (input.fetchWav ?? false)) {
     for (const assetId of finished.assetIds) {
       try {
-        await fetchWavOp.run({ assetId })
+        assertNotAborted(context)
+          await fetchWavOp.run({ assetId }, context)
         wavNotes.push(`${assetId}: WAV fetched`)
       } catch (err) {
         wavNotes.push(`${assetId}: WAV failed (${err instanceof Error ? err.message : err}) — MP3 kept; retry with aurora_fetch_wav`)
@@ -1284,13 +1476,9 @@ const extendOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_extend',
-  description:
-    'Continue a track past a point in time (Suno extend). A Suno-generated asset routes by its provider ' +
-    'ids (no upload, so the "matches an existing recording" guard never fires); an imported asset or ' +
-    'external file routes through upload-extend (max 8 min, Suno\'s own output rejected there). Set ' +
-    'style + title to steer the continuation (custom mode); omit both and the provider reuses the ' +
-    "source's own settings. 2 variations land linked to the source. PAID (Suno credits; v6 cost unobserved, check aurora_get_credits). " +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Extend audio', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno continuation: sourceAssetId or sourcePath; provider ids choose an id-based route, otherwise audio uploads. Optional prompt/style/title, continueAt and provider controls use schema defaults. Project follows source unless specified; trackId defaults to project root. background defaults false; fetchWav defaults false and adds paid conversion if enabled. Returns durable job and landed assets linked to source. Advance aurora_get_job_status rather than resubmit.",
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to continue'),
     sourcePath: z.string().optional().describe('OR an external audio file path (upload-extend route)'),
@@ -1316,7 +1504,7 @@ const extendOp: Operation<{
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false; ~0.4 credits each)')
   }),
-  async run(input) {
+  async run(input, context) {
     const customMode = Boolean(input.style || input.title)
     if (customMode && (!input.style || !input.title)) {
       throw new Error('Custom mode needs BOTH a style and a title (you set only one).')
@@ -1352,6 +1540,7 @@ const extendOp: Operation<{
     let route: 'extend' | 'upload-extend'
     if (ids) {
       route = 'extend'
+      assertNotAborted(context)
       taskId = await createExtend({ ...shared, audioId: ids.audioId, taskId: ids.taskId })
     } else {
       route = 'upload-extend'
@@ -1362,7 +1551,9 @@ const extendOp: Operation<{
       if (duration !== null && input.continueAt !== undefined && input.continueAt >= duration) {
         throw new Error(`continueAt (${input.continueAt}s) must be inside the source (${Math.round(duration)}s).`)
       }
+      assertNotAborted(context)
       const uploadUrl = await uploadSourceAudio(sourcePath)
+      assertNotAborted(context)
       taskId = await createUploadExtend({ ...shared, uploadUrl })
     }
 
@@ -1376,7 +1567,7 @@ const extendOp: Operation<{
     )
     manifest.trackId = trackId
     await saveJob(manifest)
-    return finishDerivedJob(manifest, input)
+    return finishDerivedJob(manifest, input, context)
   }
 }
 
@@ -1397,12 +1588,9 @@ const replaceSectionOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_replace_section',
-  description:
-    'v6 section editing (Suno replace-section): re-generate ONE time window of a track (≥10 s) and keep ' +
-    'everything outside it. A Suno-generated asset routes by provider ids (no upload); anything else ' +
-    'uploads (Suno\'s own output rejected on that route). Give the new lyrics for the window AND the ' +
-    'full lyrics of the song after the edit. 2 variations land linked to the source. PAID (Suno credits). ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Replace audio section', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno section replacement: sourceAssetId or sourcePath, prompt and section timing/control fields from the input schema. Provider ids choose the id route, otherwise audio uploads. Project follows source unless specified; trackId defaults to project root; background and fetchWav default false. WAV fetching adds credits. Returns job and replacement assets linked to source. Advance aurora_get_job_status, then inspect assets.",
   input: z.object({
     sourceAssetId: z.string().optional().describe('Project asset to edit'),
     sourcePath: z.string().optional().describe('OR an external audio file path'),
@@ -1419,7 +1607,7 @@ const replaceSectionOp: Operation<{
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false)')
   }),
-  async run(input) {
+  async run(input, context) {
     if (input.endS - input.startS < 10) throw new Error('The window must be at least 10 seconds wide.')
     const { sourcePath, sourceAsset } = resolveSourcePath(input)
     const ids = sunoIdsOf(sourceAsset)
@@ -1441,10 +1629,13 @@ const replaceSectionOp: Operation<{
     let route: 'ids' | 'upload'
     if (ids) {
       route = 'ids'
+      assertNotAborted(context)
       taskId = await createReplaceSection({ ...common, ...ids })
     } else {
       route = 'upload'
+      assertNotAborted(context)
       const uploadUrl = await uploadSourceAudio(sourcePath)
+      assertNotAborted(context)
       taskId = await createReplaceSection({ ...common, uploadUrl, model })
     }
 
@@ -1458,7 +1649,7 @@ const replaceSectionOp: Operation<{
     )
     manifest.trackId = trackId
     await saveJob(manifest)
-    return finishDerivedJob(manifest, input)
+    return finishDerivedJob(manifest, input, context)
   }
 }
 
@@ -1484,12 +1675,9 @@ const mashupOp: Operation<{
   fetchWav?: boolean
 }> = {
   id: 'aurora_mashup',
-  description:
-    'v6 mashup (Suno generate-mashup): compose one track from TWO uploaded sources. Both sources upload, ' +
-    "so Suno's own output is rejected (catalog guard) — feed your own renders/stems. Custom mode (style + " +
-    'title) steers the result; non-custom takes a ≤500-char prompt. 2 variations land linked to source A. ' +
-    'PAID (Suno credits). ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Mash up two sources', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: "PAID Suno mashup: two source assets/paths and optional prompt/style/title/provider controls; both sources upload. Project follows source A unless specified; trackId defaults to project root. background and fetchWav default false; WAV fetching adds credits. Returns job and saved variations linked to source A. Advance aurora_get_job_status, then inspect assets; repeating spends again.",
   input: z.object({
     sourceAssetIdA: z.string().optional().describe('First source: project asset'),
     sourcePathA: z.string().optional().describe('OR first source: external file'),
@@ -1511,7 +1699,7 @@ const mashupOp: Operation<{
     background: z.boolean().optional(),
     fetchWav: z.boolean().optional().describe('Blocking mode only: fetch the provider WAV per variation (default false)')
   }),
-  async run(input) {
+  async run(input, context) {
     const a = resolveSourcePath({ sourceAssetId: input.sourceAssetIdA, sourcePath: input.sourcePathA })
     const b = resolveSourcePath({ sourceAssetId: input.sourceAssetIdB, sourcePath: input.sourcePathB })
     const customMode = input.customMode ?? Boolean(input.style || input.title)
@@ -1533,8 +1721,11 @@ const mashupOp: Operation<{
     const projectId = await resolveDerivedProject(input.projectId, a.sourceAsset, baseName)
     const trackId = resolveLandingTrack(projectId, input.trackId)
 
+    assertNotAborted(context)
     const urlA = await uploadSourceAudio(a.sourcePath)
+    assertNotAborted(context)
     const urlB = await uploadSourceAudio(b.sourcePath)
+    assertNotAborted(context)
     const taskId = await createMashup({
       uploadUrlList: [urlA, urlB],
       customMode,
@@ -1574,50 +1765,36 @@ const mashupOp: Operation<{
     )
     manifest.trackId = trackId
     await saveJob(manifest)
-    return finishDerivedJob(manifest, input)
+    return finishDerivedJob(manifest, input, context)
   }
 }
 
-const splitOp: Operation<{ assetId: string; background?: boolean }> = {
+const splitOp: Operation<{ assetId: string; background?: boolean; estimateOnly?: boolean }> = {
   id: 'aurora_split',
-  description:
-    'Split ANY project asset into 7 stems (vocals, kick, snare, toms, hats, bass, everything-else) via ' +
-    '3 MVSEP jobs + local phase-cancellation. Takes 3-5+ minutes. PAID (REAL MVSEP credits — do not ' +
-    're-split an asset that already has stems; check aurora_list_assets first). Stems land ' +
-    'PROGRESSIVELY as each MVSEP job finishes. ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Split seven stems', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema.or(planSchema)),
+  description: 'Split an asset into seven checked stems using three measured MVSEP routes plus local phase cancellation. PAID: uploads audio and spends MVSEP premium minutes; estimateOnly:true is free. background defaults true and queues durable work. Existing valid stems or an active split are reused without another submission. Returns a job with per-route attempts. Five stems come from MVSEP (vocals, kick, snare, toms, bass); two are built locally: hats = the DrumSep drums bus minus kick, snare and toms, and ee ("Inst", everything else) = the original minus vocals, drums bus and bass. Advance with aurora_get_job_status, then check with aurora_check_separation_result.',
   input: z.object({
-    assetId: z.string().describe('The asset to split (generation, cover, import, or reference)'),
-    background: z.boolean().optional().describe('Strongly recommended — splits often exceed blocking-call ceilings')
+    assetId: z.string().describe('Asset id from aurora_list_assets'),
+    background: z.boolean().default(true).describe('true queues work; false waits up to 12 minutes with progress'),
+    estimateOnly: z.boolean().default(false).describe('Free: exact three-route topology and duration-based provider units')
   }),
-  async run(input) {
-    const existing = getStems(input.assetId)
-    if (existing.length >= 7) {
-      return ok(
-        { stems: existing },
-        'This asset ALREADY has a full 7-stem split — returning the existing stems instead of spending ' +
-          'MVSEP credits again. Delete the stems first if you really want a re-split.'
-      )
+  async run(input, context) {
+    if (input.estimateOnly) {
+      const asset = getAsset(input.assetId)
+      if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
+      const durationSeconds = await probeDurationSeconds(asset.path)
+      return ok(separationPlan(Object.values(SPLIT_ROUTES).map((route) => route.id), durationSeconds),
+        'Free split plan: three MVSEP calls plus local hats/everything-else calculation. Nothing submitted.')
     }
-
-    const prep = await prepareSplit(input.assetId)
-    const hashes = await createSplitJobs(prep.audioBytes)
-
-    const manifest = newJobManifest(
-      'split',
-      `spl-${uuidv4().slice(0, 8)}`,
-      prep.asset.projectId,
-      prep.asset.name,
-      { assetId: input.assetId },
-      { assetId: input.assetId, stemsDir: prep.stemsDir, hashes }
-    )
-    manifest.stage = 'separating (0/3 jobs landed)'
-    await saveJob(manifest)
-
-    if (input.background) {
-      return ok(jobSummary(manifest), jobText(manifest))
-    }
-    const finished = await awaitJob(manifest)
+    const active = (await listJobs()).find((job) => job.kind === 'split' &&
+      job.provider.assetId === input.assetId && isJobActive(job))
+    if (active) return ok({ ...jobSummary(active), reused: true },
+      `Active split job ${active.jobId} reused; no new paid job. Advance that job with aurora_get_job_status.`)
+    const manifest = await startSplitJob(input.assetId)
+    if (!isJobActive(manifest)) return ok({ ...jobSummary(manifest), reused: true }, jobText(manifest))
+    if (input.background !== false) return ok(jobSummary(manifest), jobText(manifest))
+    const finished = await awaitJob(manifest, context)
     return ok(jobSummary(finished), jobText(finished))
   }
 }
@@ -1634,29 +1811,15 @@ const extractOp: Operation<{
   background?: boolean
 }> = {
   id: 'aurora_extract',
-  description:
-    'The Sample Extractor: pull SPECIFIC instruments out of ANY asset via the per-instrument MVSEP ' +
-    'catalog (~35 instruments + bundles). Everything Else is ALWAYS included free (local phase-cancel), ' +
-    'so the parts sum back to the original. VARIABLE PAID COST: one MVSEP call per individual stem, but ' +
-    'bundles count ONCE however many members you pick (drum kit = 6 stems for 1 call; lead+rhythm guitar ' +
-    '= 1 call; vocal modes = 1 call; dereverb = 1 call). Call with estimateOnly=true FIRST to see the ' +
-    'exact call plan before spending. 12-minute input cap. Results land in <project>/extracts/ + the ' +
-    'extraction_stems table; detected musical key rides every row. Takes minutes per call (sequential). ' +
-    BACKGROUND_DESCRIBE,
+  annotations: { title: 'Extract selected stems', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema.or(planSchema)),
+  description: "PAID MVSEP extraction of catalog groups, instruments and vocal modes from assetId, up to 12 minutes. stems defaults empty, vocalMode absent and includeReverb false; Everything Else is free local phase cancellation. estimateOnly:true is free and returns exact route topology/options, quality/evidence and duration confidence. Otherwise uploads source audio and spends credits per planned call; bundles share calls, dereverb chains dry vocals. background defaults true and queues a durable plan; false advances with progress. Returns attempts, requested/delivered files, detectedKey and partial failures. Advance aurora_get_job_status, then aurora_check_separation_result.",
   input: z.object({
     assetId: z.string().describe('The asset to extract from (any kind)'),
     stems: z
-      .array(z.string())
+      .array(z.enum(EXTRACT_SELECTION_IDS as [string, ...string[]]))
       .optional()
-      .describe(
-        'Non-vocal catalog stem ids. Bundles: drum_kick/drum_snare/drum_toms/drum_hihats/' +
-          'drum_cymbals_crash/drum_cymbals_ride (one call), guitar_lead/guitar_rhythm (one call). ' +
-          'Individuals: piano, digital_piano, organ, accordion, harpsichord, saxophone, flute, trumpet, ' +
-          'trombone, french_horn, tuba, clarinet, oboe, bassoon, harmonica, guitar_acoustic, ' +
-          'guitar_electric, mandolin, banjo, ukulele, harp, sitar, dobro, violin, viola, cello, ' +
-          'double_bass, bells, congas, tambourine, marimba, glockenspiel, timpani, triangle, ' +
-          'wind_chimes, bass, synth'
-      ),
+      .describe(`Non-vocal catalog stem ids: ${EXTRACT_SELECTION_IDS.join(', ')}. Vocal stems come from vocalMode/includeReverb; ee is free and automatic.`),
     vocalMode: z.enum(['lead_back', 'male_female']).optional().describe(VOCAL_MODE_DESCRIBE),
     includeReverb: z
       .boolean()
@@ -1671,41 +1834,27 @@ const extractOp: Operation<{
       .describe('Return the call plan + cost estimate WITHOUT spending anything'),
     background: z.boolean().optional().describe('Strongly recommended — sequential calls take minutes each')
   }),
-  async run(input) {
+  async run(input, context) {
     const selection = {
       stems: input.stems ?? [],
       vocalSeparationType: input.vocalMode ?? null,
       includeReverb: input.includeReverb ?? false
     }
 
-    // Validate selection ids early (clear error beats a silent no-op call plan).
-    const known = new Set([
-      ...Object.keys(EXTRACT_INDIVIDUAL_STEMS),
-      ...EXTRACT_BUNDLES.drumsep.stems,
-      ...EXTRACT_BUNDLES.lead_rhythm_guitar.stems
-    ])
-    const unknown = selection.stems.filter((s) => !known.has(s))
-    if (unknown.length > 0) {
-      throw new Error(`Unknown stem id(s): ${unknown.join(', ')}. See the stems param description for the catalog.`)
-    }
-
     const asset = getAsset(input.assetId)
     if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
     const duration = await probeDurationSeconds(asset.path)
-    const estimate = estimateExtractCost(selection, duration ?? 60)
+    const plan = planApiCalls(selection)
+    const rawEstimate = duration === null ? null : estimateExtractCost(selection, duration)
+    const estimate = rawEstimate ? { ...rawEstimate, purpose: 'Future Aurora metering; credits is not a current provider price.' } : null
+    const routePlan = separationPlan(plan.calls.map((call) => call.routeId), duration, plan.calls)
+    const plannedCalls = plan.calls.length
 
     if (input.estimateOnly) {
-      return ok(
-        {
-          estimate,
-          durationSeconds: duration,
-          note: 'Nothing spent. Re-run without estimateOnly to fire the plan.'
-        },
-        `Plan: ${estimate.totalCalls} MVSEP call(s) on a ~${estimate.minuteMultiplier}-minute track. ` +
-          `Bundles: ${estimate.breakdown.bundles.map((b) => b.bundleId).join(', ') || 'none'}. ` +
-          `Individual: ${estimate.breakdown.individualStems.join(', ') || 'none'}. EE included free. Nothing spent.`
-      )
+      return ok({ ...routePlan, estimate, stemsToDeliver: plan.stemsToDeliver },
+        `Free plan: ${plannedCalls} MVSEP call(s). Duration ${duration === null ? 'unknown; price units cannot be estimated' : `${duration}s`}. Everything Else is local. Nothing submitted.`)
     }
+    assertNotAborted(context)
 
     const { asset: prepared, state } = await prepareExtract(input.assetId, selection)
 
@@ -1719,46 +1868,57 @@ const extractOp: Operation<{
         stems: selection.stems,
         vocalMode: selection.vocalSeparationType,
         includeReverb: selection.includeReverb,
-        plannedCalls: estimate.totalCalls
+        plannedCalls
       },
       { assetId: input.assetId, extract: state }
     )
-    manifest.stage = `planned ${state.calls.length} MVSEP call(s)`
+    manifest.stage = `queued plan: ${state.calls.length} MVSEP call(s); no submission yet`
     await saveJob(manifest)
 
-    if (input.background) {
+    if (input.background !== false) {
       const summary = jobSummary(manifest)
       ;(summary as Record<string, unknown>).estimate = estimate
-      return ok(summary, `${jobText(manifest)} Plan: ${estimate.totalCalls} MVSEP call(s).`)
+      summary.plan = routePlan
+      return ok(summary, `${jobText(manifest)} Plan: ${plannedCalls} MVSEP call(s).`)
     }
-    const finished = await awaitJob(manifest)
+    const finished = await awaitJob(manifest, context)
     const summary = jobSummary(finished)
     ;(summary as Record<string, unknown>).estimate = estimate
-    if (finished.status === 'done' && finished.provider.extract?.detectedKey) {
+    summary.plan = routePlan
+    if ((finished.status === 'done' || finished.status === 'completed') && finished.provider.extract?.detectedKey) {
       ;(summary as Record<string, unknown>).detectedKey = finished.provider.extract.detectedKey
     }
     return ok(summary, jobText(finished))
   }
 }
 
-const getJobStatusOp: Operation<{ jobId: string }> = {
+const getJobStatusOp: Operation<{ jobId: string; waitSeconds?: number; advance?: boolean }> = {
   id: 'aurora_get_job_status',
-  description:
-    'Poll a background job (generate / sounds / cover / split). Advances the job: downloads and ' +
-    'registers whatever the provider has finished since the last poll (split stems land progressively). ' +
-    'Returns streamUrls for in-progress generations — playable immediately.',
-  input: z.object({ jobId: z.string() }),
-  async run(input) {
+  annotations: { title: 'Advance or read job', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  outputSchema: outputSchema(jobSchema),
+  description: 'Read or advance any durable generation, split or extraction job. Default advance:true may upload the next extraction/split call, spend credits, download checked outputs and write library files. waitSeconds defaults 0 (one advancement), maximum 30 (bounds waiting between engine units; an in-flight interaction settles); advance:false gives a free local snapshot. Returns states, attempts, partial failures, outputs and expiring Suno preview URLs. Call again to resume, or aurora_cancel_job to stop future units.',
+  input: z.object({
+    jobId: z.string(),
+    waitSeconds: z.number().min(0).max(30).default(0),
+    advance: z.boolean().default(true).describe('false reads the manifest only; true may spend credits and land files')
+  }),
+  async run(input, context) {
     const manifest = await loadJob(input.jobId)
     if (!manifest) throw new Error(`Job not found: ${input.jobId}. Use aurora_list_jobs.`)
-    const advanced = manifest.status === 'running' ? await advanceJob(manifest) : manifest
+    if (input.advance === false || !isJobActive(manifest)) return ok(jobSummary(manifest), jobText(manifest))
+    const advanced = input.waitSeconds ? await awaitJob(manifest, context, input.waitSeconds * 1000) :
+      await advanceJob(manifest, context?.signal)
+    await context?.onProgress?.({ progress: Object.values(advanced.landed).filter(Boolean).length,
+      message: `${advanced.status}: ${advanced.stage}` })
     return ok(jobSummary(advanced), jobText(advanced))
   }
 }
 
 const listJobsOp: Operation<Record<string, never>> = {
   id: 'aurora_list_jobs',
-  description: 'List all background jobs (newest first) with status and landed outputs.',
+  annotations: { title: 'Local job snapshots', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ jobs: z.array(jobSchema) })),
+  description: "Free local snapshots, no inputs: returns durable jobs with states, outputs, per-route attempts and failures. Never advances, uploads or spends. Use aurora_get_job_status advance:false for a single snapshot, advance:true to resume paid work, or aurora_cancel_job to stop future units.",
   input: z.object({}).strict(),
   async run() {
     const jobs = await listJobs()
@@ -1776,10 +1936,9 @@ const pitchShiftOp: Operation<{
   format?: 'wav' | 'mp3'
 }> = {
   id: 'aurora_pitch_shift',
-  description:
-    'Pitch-shift an asset or audio file by +/- semitones (local ffmpeg, FREE, output locked to 44.1kHz). ' +
-    'Default varispeed (tempo shifts with pitch); preserveTempo keeps tempo constant. If the input was a ' +
-    'project asset, the result registers as a new import asset in the same project.',
+  annotations: { title: 'Pitch shift locally', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ outputPath: z.string(), engine: z.string(), asset: assetSchema.nullable() })),
+  description: "Free local audio processing: assetId or absolute path and required semitones. preserveTempo defaults false (varispeed); format defaults wav, optional mp3. Writes a sibling output and registers a new asset when input is an asset. Returns outputPath, engine and nullable asset. Repeating can overwrite output and add another row; list assets or import into the DAW next.",
   input: z.object({
     assetId: z.string().optional(),
     path: z.string().optional().describe('OR an absolute file path'),
@@ -1787,7 +1946,7 @@ const pitchShiftOp: Operation<{
     preserveTempo: z.boolean().optional(),
     format: z.enum(['wav', 'mp3']).optional().describe('Output format (default wav)')
   }),
-  async run(input) {
+  async run(input, context) {
     const { path, asset } = resolveAudioInput(input)
     const format = input.format ?? 'wav'
     const stem = basename(path, extname(path))
@@ -1813,15 +1972,15 @@ const pitchShiftOp: Operation<{
 
 const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' }> = {
   id: 'aurora_convert',
-  description:
-    'Convert an asset or audio file to WAV (44.1kHz stereo float32) or MP3 (320k CBR) via local ffmpeg ' +
-    '(FREE). If the input was a project asset, the result registers as a new track asset.',
+  annotations: { title: 'Convert local audio', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ outputPath: z.string(), asset: assetSchema.nullable() })),
+  description: "Free local ffmpeg conversion: assetId or absolute path and required to (wav or mp3). WAV is 44.1 kHz stereo float32; MP3 is 320k CBR. Writes a sibling file and creates an asset for asset inputs. Returns outputPath and nullable asset. Repeating may overwrite and duplicate library rows. List assets or use the output path in the DAW.",
   input: z.object({
     assetId: z.string().optional(),
     path: z.string().optional(),
     to: z.enum(['wav', 'mp3'])
   }),
-  async run(input) {
+  async run(input, context) {
     const { path, asset } = resolveAudioInput(input)
     const stem = basename(path, extname(path))
     const sameExt = extname(path).toLowerCase() === `.${input.to}`
@@ -1855,10 +2014,9 @@ const rvcUpscaleOp: Operation<{
   f0UpKey?: number
 }> = {
   id: 'aurora_rvc_upscale',
-  description:
-    "RVC vocal upscale (local Python sidecar — FREE, but needs the aurora repo + sidecar deps; set the " +
-    'AURORA_REPO env var). Input: a vocals stem (assetId + stemType "vocals") or any WAV path. Output ' +
-    'lands next to the input as <name>_upscaled.wav.',
+  annotations: { title: 'Upscale vocals locally', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ outputPath: z.string() })),
+  description: "Free local RVC Python sidecar: supply WAV path or assetId plus stemType (default vocals), model defaults jb and f0UpKey defaults 0. Requires AURORA_REPO and installed sidecar dependencies. Writes/overwrites sibling _upscaled.wav; returns outputPath. No provider upload or credits. Import output with aurora_import_file if wanted in the library.",
   input: z.object({
     assetId: z.string().optional().describe('Asset whose vocals stem to upscale'),
     stemType: z.string().optional().describe('Stem to pick from the asset (default "vocals")'),
@@ -1866,7 +2024,7 @@ const rvcUpscaleOp: Operation<{
     model: z.string().optional().describe("'jb' (default) or 'purposeaudacity'"),
     f0UpKey: z.number().optional().describe('Pitch shift in semitones (default 0)')
   }),
-  async run(input) {
+  async run(input, context) {
     let inputPath = input.path
     if (input.assetId) {
       const stems = getStems(input.assetId)
@@ -1895,10 +2053,9 @@ const ripMidiOp: Operation<{
   instrument?: string
 }> = {
   id: 'aurora_rip_midi',
-  description:
-    'Rip MIDI from an audio stem or file (local Python sidecar — FREE, but needs the aurora repo + ' +
-    'sidecar deps; set AURORA_REPO). drums→onset detection, mono→CREPE, poly→Basic Pitch. Output: <name>.mid ' +
-    'next to the input.',
+  annotations: { title: 'Transcribe MIDI locally', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ outputPath: z.string() })),
+  description: "Free local MIDI transcription: WAV path or assetId plus required stemType; mode defaults auto, optional instrument hints routing (drums onset, mono CREPE, poly Basic Pitch). Requires AURORA_REPO and sidecar dependencies. Writes/overwrites sibling .mid and returns outputPath. No upload or credits. Open the MIDI in the DAW.",
   input: z.object({
     assetId: z.string().optional(),
     stemType: z.string().optional().describe('Which stem of the asset (e.g. "bass", "kick")'),
@@ -1906,7 +2063,7 @@ const ripMidiOp: Operation<{
     mode: z.enum(['poly', 'mono', 'auto']).optional().describe('Transcription path (default auto)'),
     instrument: z.string().optional().describe('Instrument hint for auto-routing, e.g. "bass", "kick"')
   }),
-  async run(input) {
+  async run(input, context) {
     let inputPath = input.path
     let instrument = input.instrument
     if (input.assetId) {
@@ -1927,31 +2084,112 @@ const ripMidiOp: Operation<{
 
 // ── Skills delivery (MCP-only clients) ──────────────────────────
 
+const listSeparationRoutesOp: Operation<{ surface?: string; group?: string }> = {
+  id: 'aurora_list_separation_routes',
+  annotations: { title: 'Measured separation routes', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ routes: z.array(routeSchema) })),
+  description: 'Free, local route discovery: returns every measured route with MVSEP algorithm, exact options/output keys, checks, quality, evidence and surface. Optional surface selects split or an extract category; group matches a route id, stem id or stem prefix. Nothing uploads or spends credits. Use aurora_split estimateOnly:true or aurora_extract estimateOnly:true to plan, then explicitly run the paid tool.',
+  input: z.object({
+    surface: z.enum(['split', 'extract group', 'extract instrument', 'extract bundle']).optional(),
+    group: z.string().optional().describe('Route id, delivered stem id or stem prefix (for example drum or guitar)')
+  }),
+  async run(input) {
+    const routes = listSeparationRoutes().filter((route) => (!input.surface || route.surface === input.surface) &&
+      (!input.group || route.id === input.group || Object.keys(route.delivers).some((stem) =>
+        stem === input.group || stem.startsWith(`${input.group}_`))))
+      .map((route) => ({ ...route, sep_type: String(route.sepType),
+        outputKeys: planSeparationRoute(route.id).outputKeys, checks: { family: route.family, sums: route.sums } }))
+    return ok({ routes }, `${routes.length} separation routes. Plan before spending; check results after landing.`)
+  }
+}
+
+const checkSeparationResultOp: Operation<{
+  jobId?: string; routeId?: string; inputPath?: string; outputs?: Record<string, string>
+}> = {
+  id: 'aurora_check_separation_result',
+  annotations: { title: 'Local separation checks', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(checkSchema),
+  description: 'Free, local audio verification. Supply either jobId for saved separation provenance/replay, or routeId + inputPath + outputs keyed by exact MVSEP output key (including auxiliary sum outputs). Returns ok, problems, notes, metrics, checked window and limitations. Metrics are in dB: a sum metric is how far the parts miss their whole (-20 or lower passes; -200 means digital silence, an exact sum), level metrics are relative to the input. No upload or provider spending. Job checks report recorded passes when discarded auxiliary files prevent replay; names and sums cannot detect clean swaps for brass/strings/keys/guitar. Inspect problems before authorizing replacement paid work.',
+  input: z.object({
+    jobId: z.string().optional(), routeId: z.string().optional(), inputPath: z.string().optional(),
+    outputs: z.record(z.string()).optional().describe('Exact outputKey → local WAV path; include every checking output')
+  }).superRefine((input, ctx) => {
+    const local = input.routeId !== undefined || input.inputPath !== undefined || input.outputs !== undefined
+    if (input.jobId ? local : !input.routeId || !input.inputPath || !input.outputs)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Supply either jobId alone or routeId, inputPath and outputs together.' })
+  }),
+  async run(input) {
+    if (!input.jobId) {
+      if (!listSeparationRoutes().some((route) => route.id === input.routeId)) throw new Error(`Unknown routeId: ${input.routeId}. Use aurora_list_separation_routes.`)
+      return ok(await checkSeparationOutputs({ routeId: input.routeId!, inputPath: input.inputPath!, outputs: input.outputs! }),
+        'Local audio checks finished; inspect ok, problems and limitations.')
+    }
+    const job = await loadJob(input.jobId)
+    if (!job) throw new Error(`Job not found: ${input.jobId}`)
+    const attempts: SeparationAttempt[] = [...Object.values(job.provider.splitAttempts ?? {}).filter((a): a is SeparationAttempt => Boolean(a)),
+      ...(job.provider.extract?.callResults ?? [])]
+    if (!attempts.length) throw new Error('Provide a split/extract job with recorded separation attempts, or local route outputs.')
+    const checks = await Promise.all(attempts.map(async (attempt) => {
+      const recorded = attempt.checks
+      if (!recorded) return { routeId: attempt.routeId, ok: false, problems: [attempt.error?.message ?? `No saved check for ${attempt.status} attempt`],
+        notes: [], metrics: {}, checkWindowSeconds: 0, limitations: ['No completed check is recorded.'] }
+      const missingFiles = recorded.outputs.filter((output) => output.path && !existsSync(output.path))
+      if (missingFiles.length) return { ...recorded, routeId: attempt.routeId, ok: false,
+        problems: missingFiles.map((output) => `Recorded output is missing: ${output.key}`),
+        limitations: [...recorded.limitations, 'Recorded landing checks do not certify files that have since disappeared.'] }
+      if (recorded.unavailableReplayKeys.length || !attempt.inputPath) return { ...recorded,
+        routeId: attempt.routeId, verification: 'recorded', ok: true, problems: [],
+        notes: [...recorded.notes, 'Reporting the recorded landing check, not a new replay.'],
+        limitations: [...recorded.limitations, 'Current files cannot be fully rechecked without all auxiliary outputs and the recorded input.'] }
+      const outputs = Object.fromEntries(recorded.outputs.filter((out) => out.path).map((out) => [out.key, out.path!]))
+      return { ...await checkSeparationOutputs({ routeId: attempt.routeId, inputPath: attempt.inputPath, outputs }),
+        routeId: attempt.routeId, verification: 'replayed' }
+    }))
+    return ok({ jobId: job.jobId, ok: checks.every((check) => check.ok),
+      problems: checks.flatMap((check) => check.problems.map((problem) => `${check.routeId}: ${problem}`)),
+      notes: checks.flatMap((check) => check.notes),
+      metrics: Object.fromEntries(checks.flatMap((check) => Object.entries(check.metrics).map(([key, value]) => [`${check.routeId}.${key}`, value]))),
+      checkWindowSeconds: Math.min(...checks.map((check) => check.checkWindowSeconds)),
+      limitations: [...new Set(checks.flatMap((check) => check.limitations))], checks },
+    `Checked provenance/local outputs for job ${job.jobId}; inspect problems and replay limitations.`)
+  }
+}
+
+const cancelJobOp: Operation<{ jobId: string }> = {
+  id: 'aurora_cancel_job',
+  annotations: { title: 'Cancel future job units', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(jobSchema),
+  description: 'Stop future submission, polling and landing units of a durable job. Input jobId; returns its manifest summary. Free local cancellation intent; already accepted provider work may still run and is not refunded. An interaction in progress settles, and saved outputs stay. Read aurora_get_job_status with advance:false to inspect the final state.',
+  input: z.object({ jobId: z.string() }),
+  async run(input) { const job = await cancelJob(input.jobId); return ok(jobSummary(job), jobText(job)) }
+}
+
 const getPromptingGuideOp: Operation<{ topic?: string }> = {
   id: 'aurora_get_prompting_guide',
-  description:
-    'Read a bundled Aurora skill/guide (workflow recipes, Suno prompting, cost discipline, stems). ' +
-    'Call with no topic to list available guides. CLI users: `aurora install-skills` installs these ' +
-    'into .claude/skills/ instead.',
+  annotations: { title: 'Bundled Aurora guides', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.union([z.object({ guides: z.array(z.object({ name: z.string(), description: z.string() })) }), z.object({ name: z.string(), content: z.string() })])),
+  description: "Free offline bundled guides: omit topic to list names and descriptions; use exact name or an unambiguous keyword to retrieve content. Ambiguous names return guidance to choose. Covers workflow, cost discipline, Suno prompting and measured separation routes. Nothing uploads/spends. Plan with route discovery and estimateOnly before invoking paid tools.",
   input: z.object({
     topic: z.string().optional().describe('Guide name (from the no-topic listing) or a keyword')
   }),
-  async run(input) {
+  async run(input, context) {
     const names = Object.keys(SKILLS)
     if (!input.topic) {
-      return ok({ guides: names }, `Available guides:\n${names.join('\n')}\nCall again with topic:<name>.`)
+      const guides = names.map((name) => ({ name, description: /^description:\s*(.+)$/m.exec(SKILLS[name])?.[1]?.trim() ?? name }))
+      return ok({ guides }, `Available guides: ${names.join(', ')}. Retrieve with topic:<exact name>.`)
     }
-    const exact = SKILLS[input.topic]
-    if (exact) return ok({ name: input.topic, content: exact }, exact)
-    const fuzzy = names.find((n) => n.includes(input.topic!.toLowerCase()))
-    if (fuzzy) return ok({ name: fuzzy, content: SKILLS[fuzzy] }, SKILLS[fuzzy])
+    const exact = Object.hasOwn(SKILLS, input.topic) ? SKILLS[input.topic] : undefined
+    if (exact) return ok({ name: input.topic, content: exact }, `Retrieved guide ${input.topic}.`)
+    const matches = names.filter((name) => name.includes(input.topic!.toLowerCase()))
+    if (matches.length === 1) return ok({ name: matches[0], content: SKILLS[matches[0]] }, `Retrieved guide ${matches[0]}.`)
+    if (matches.length > 1) throw new Error(`Unknown exact guide: ambiguous topic "${input.topic}". Choose ${matches.join(', ')}.`)
     throw new Error(`No guide matching "${input.topic}". Available: ${names.join(', ')}`)
   }
 }
 
 // ── Registry ────────────────────────────────────────────────────
 
-export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
+const operationDefinitions = [
   getCredits,
   getWorkspaceState,
   createProjectOp,
@@ -1979,6 +2217,9 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
   mashupOp,
   splitOp,
   extractOp,
+  listSeparationRoutesOp,
+  checkSeparationResultOp,
+  cancelJobOp,
   getJobStatusOp,
   listJobsOp,
   pitchShiftOp,
@@ -1987,3 +2228,53 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = [
   ripMidiOp,
   getPromptingGuideOp
 ] as unknown as ReadonlyArray<Operation<unknown>>
+
+export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = operationDefinitions.map((op) => ({
+  ...op,
+  async run(input, context) {
+    let result: OperationResult | undefined
+    try {
+      assertNotAborted(context)
+      const args = op.input.parse(input)
+      let latest: OperationProgress = { progress: 0, message: `${op.annotations.title}: starting` }
+      const report = async (update: OperationProgress): Promise<void> => {
+        latest = { ...update, progress: Math.max(latest.progress, update.progress) }
+        if (!context?.signal?.aborted) await context?.onProgress?.(latest)
+      }
+      const reportsProgress = !op.annotations.readOnlyHint && op.annotations.openWorldHint
+      const heartbeat = reportsProgress && context?.onProgress ? setInterval(() => {
+        void report(latest).catch(() => {})
+      }, 5000) : undefined
+      try {
+        if (reportsProgress) await report(latest)
+        result = await op.run(args, { ...context, onProgress: report })
+      } finally { if (heartbeat) clearInterval(heartbeat) }
+      const data = result.structuredContent
+      if (['failed', 'error', 'partial'].includes(String(data.status))) {
+        const detail = (data.lastError as JobError | undefined) ?? {
+          code: 'JOB_PARTIAL', message: 'Some planned outputs could not be delivered.', retryable: false,
+          nextAction: 'Inspect callResults, saved outputs and limitations before authorizing replacement paid work.'
+        }
+        result = { ...result, isError: true, data: { ...data, error: { ...detail, jobId: data.jobId } },
+          structuredContent: { ...data, error: { ...detail, jobId: data.jobId } } }
+      }
+      if (context?.signal?.aborted) {
+        const failure = operationFailure(Object.assign(new Error('Request cancelled; no subsequent units were started.'), {
+          code: 'REQUEST_CANCELLED', retryable: false, nextAction: 'Read the durable job snapshot; accepted provider work may still run. Use aurora_cancel_job to stop future units.'
+        }), typeof data.jobId === 'string' ? data.jobId : undefined)
+        result = { ...failure, data: { ...data, ...failure.data }, structuredContent: { ...data, ...failure.structuredContent } }
+      }
+      const validation = op.outputSchema.safeParse(JSON.parse(JSON.stringify(result.structuredContent)))
+      if (!validation.success) throw Object.assign(new Error(`Invalid operation output: ${validation.error.issues.map((issue) =>
+        `${issue.path.join('.')}: ${issue.message}`).join('; ')}`), {
+        code: 'OUTPUT_CONTRACT', retryable: false,
+        nextAction: 'Report this server contract mismatch. Inspect any existing job before repeating paid work.'
+      })
+      return result
+    } catch (error) {
+      const jobId = result?.structuredContent.jobId ??
+        (input && typeof input === 'object' && 'jobId' in input ? input.jobId : undefined)
+      return operationFailure(error, typeof jobId === 'string' ? jobId : undefined)
+    }
+  }
+}))

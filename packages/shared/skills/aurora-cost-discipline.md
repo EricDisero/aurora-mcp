@@ -10,7 +10,7 @@ Two metered providers sit behind Aurora's cloud ops. Spend is real money. The ru
 ## Always
 
 1. **`aurora_get_credits` BEFORE the first paid call of a session** — and after a batch, to log actual spend.
-2. **Never re-split.** `aurora_split` burns real MVSEP credits; the op refuses when 7 stems already exist — don't work around it. Check `aurora_list_assets` first.
+2. **Never re-split.** `aurora_split` burns real MVSEP credits; the op refuses when 7 stems already exist — don't work around it. Check `aurora_list_assets` first. If only a group is needed, load `aurora-separation-routes` and select it through `aurora_extract`; one family hub is one group-model job.
 3. **Batch authorization, not per-call nagging.** When the user approves a multi-generation plan ("make me 4 braams and a riser"), that approval covers the enumerated batch — don't re-confirm each call. NEW spend beyond the approved batch needs a fresh ask.
 
 ## Known costs (sunoapi.org credits, measured 2026-06-10)
@@ -22,9 +22,16 @@ Two metered providers sit behind Aurora's cloud ops. Spend is real money. The ru
 | `aurora_fetch_wav` | ~0.4 credits per conversion |
 | `aurora_generate` | not yet measured — check credits before/after and report the delta |
 | `aurora_add_vocals` / `aurora_add_instrumental` | not yet measured — same generation family; check the delta and report it |
-| `aurora_split` | MVSEP credits, priced by audio duration (separate balance); ALWAYS 3 MVSEP calls |
-| `aurora_extract` | MVSEP credits, VARIABLE by selection — the op's response includes the call plan; bundles count once however many of their stems you pick. Read the estimate before confirming a big catalog run |
+| `aurora_split` | MVSEP premium minutes (separate balance); ALWAYS 3 jobs, using measured vocals 40/171, DrumSep 37/7, bass 41/5 routes |
+| `aurora_extract` | MVSEP premium minutes, VARIABLE by selection. Call with `estimateOnly: true` before spending; each group is one job, each bundle counts once however many members are selected, and each individual route is one job |
+| `aurora_list_separation_routes`, `aurora_check_separation_result` | FREE route listing / local checks; no MVSEP job submitted |
 | `aurora_get_credits`, all local ffmpeg/project ops | FREE |
+
+## MVSEP billing and failed checks
+
+MVSEP charges `max(1, floor(seconds × coefficient / 60))` premium minutes per job. Coefficients vary by route. At coefficient 1, a 15-second test and 60 seconds both cost one premium minute; shortening below the floor does not save credits. Aurora's rounded duration estimate and future pack-credit units are not the actual provider debit; report the balance delta after the batch.
+
+Every result is checked before saving. A failed identity or audio check saves nothing from that job and reports the cause; the paid submission has already happened. Read the reason before retrying, use `aurora_check_separation_result` for local checks, and obtain authorization for any submission beyond the approved batch. Do not automatically chain a second separation pass: the measured drums route got worse on a second pass.
 
 ## Cheap-first ladder
 
