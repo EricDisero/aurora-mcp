@@ -42,6 +42,7 @@ Rule (locked 2026-06-10): **op schemas expose the full wire surface with sane de
 | `audioWeight` | number | 0.00–1.00 | input-audio influence (audio-conditioned ops) |
 | `callBackUrl` | URI | — | required by generate/upload-cover at the wire; Aurora polls instead (placeholder fallback pattern in the clients) |
 | `duration` | integer | 10–360 (sec) | **Target output length. ONLY effective when `customMode: true` AND model ∈ {V5_5, V6, V6_WILD, V6_MINI} — silently ignored otherwise** (kie.ai lists default 20 s). Exposed on generate / cover / mashup since 2026-09-14; the ops throw on a non-honouring model or mode instead of letting the provider ignore it. |
+| `variety` | integer | 0–4, default 1 | **Suno's Variety: 0 Off, 1 Normal, 2 High, 3 Extra, 4 Max.** Above 0 Suno rewrites the style per take (UI behaviour, Suno help centre); 0 keeps the style as written. Documented on generate (custom mode) and upload-cover, read 2026-10-02 by a Codex research pass; the date it appeared is unknown. Exposed on generate and cover since 2026-10-02. |
 
 **Persona (generate + upload-cover, custom mode only):**
 | Param | Type | Notes |

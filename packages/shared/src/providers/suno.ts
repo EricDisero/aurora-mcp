@@ -92,6 +92,8 @@ export interface GenerationParams {
   /** Target length in seconds, 10-360. Honoured ONLY with customMode:true on
    *  V5_5 / V6 / V6_WILD / V6_MINI; silently ignored elsewhere. */
   duration?: number
+  /** 0-4 (Off, Normal, High, Extra, Max); provider default 1. Above 0 Suno rewrites the style per take. */
+  variety?: number
 }
 
 /** Wire model ids (docs.sunoapi.org, verified 2026-09-14). V6 family is
@@ -128,9 +130,11 @@ function applySharedKnobs(
     personaId?: string
     personaModel?: 'style_persona' | 'voice_persona'
     duration?: number
+    variety?: number
   }
 ): void {
   if (p.duration !== undefined) body.duration = p.duration
+  if (p.variety !== undefined) body.variety = p.variety
   if (p.vocalGender) body.vocalGender = wireVocalGender(p.vocalGender)
   if (p.negativeTags) body.negativeTags = p.negativeTags
   if (p.styleWeight !== undefined) body.styleWeight = p.styleWeight
@@ -310,6 +314,8 @@ export interface CoverParams {
   personaModel?: 'style_persona' | 'voice_persona'
   /** 10-360 s; custom mode + V5_5/V6 family only. */
   duration?: number
+  /** 0-4 (Off, Normal, High, Extra, Max); provider default 1. */
+  variety?: number
 }
 
 /** Submit an upload-and-cover (style transform) task. Poll the returned taskId
