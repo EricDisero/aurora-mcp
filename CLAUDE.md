@@ -47,7 +47,7 @@ aurora-mcp/
 - **Cover-of-a-Suno-track does not work by re-upload.** Upload-cover/extend/mashup/replace-section can reject Suno output with `errorCode 413` (existing catalog recording). Iterate with `taskId`/`audioId` routes; extend/replace_section select them when source assets carry provider ids. `cover-suno` is cover ART. Findings/scope: `docs/suno-param-surface.md`.
 - **Re-verify live docs before declaring a param absent.** Param reference: `docs/suno-param-surface.md`. **Model enum + default live ONLY in `providers/suno.ts` (`SUNO_MODELS`, `DEFAULT_SUNO_MODEL`, `normalizeModel`)**; ops/docs reference it, never restate it.
 - **Destructive ops require `confirm: true`** (delete_asset, delete_project). Splits reuse active work or seven valid distinct stems without re-spending.
-- **NEVER commit.** Eric commits at his checkpoints.
+- Each chat commits and pushes its own finished work, staged by name, under the vault's CLAUDE.md rule 2.
 
 ## Op ↔ source-module contract table
 
