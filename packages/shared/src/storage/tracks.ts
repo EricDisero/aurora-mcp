@@ -7,12 +7,13 @@
 // used only inside function bodies, so the cycle is safe under tsc/Node ESM.
 
 import { join } from 'node:path'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readdir, rename, rmdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '../db.js'
 import { getProjectDirectory, slugify } from './projects.js'
 import { setAssetTrack } from './assets.js'
+import { rewriteStemPaths } from './moved-paths.js'
 import type { Track } from '../types.js'
 
 interface TrackRow {
@@ -124,6 +125,25 @@ export async function deleteTrack(id: string): Promise<void> {
   }
 
   const dir = getTrackDirectory(id)
+  // Preserve everything the asset moves did not know about, including bridge jobs.
+  if (existsSync(dir)) {
+    const entries = await readdir(dir)
+    let preservedDirectory: string | undefined
+    if (entries.length) {
+      const base = join(getProjectDirectory(track.projectId), `${track.dirName}-files`)
+      let destination = base
+      for (let suffix = 2; existsSync(destination); suffix++) destination = `${base}-${suffix}`
+      await mkdir(destination)
+      preservedDirectory = destination
+      for (const entry of entries) {
+        const from = join(dir, entry), to = join(destination, entry)
+        await rename(from, to)
+        getDb().transaction(() => rewriteStemPaths([[from, to]]))()
+      }
+    }
+    // rmdir refuses a nonempty directory: a concurrent new file must survive.
+    await rmdir(dir)
+    if (preservedDirectory) getDb().transaction(() => rewriteStemPaths([[dir, preservedDirectory!]]))()
+  }
   getDb().prepare('DELETE FROM tracks WHERE id = ?').run(id)
-  await rm(dir, { recursive: true, force: true }).catch(() => {})
 }

@@ -81,6 +81,13 @@ async function smoke() {
       assert(client.getInstructions().trim().length > 0, 'initialize.instructions must be non-empty')
     })
     const tools = []
+    await check('README tool count matches registry', async () => {
+      const { ALL_OPERATIONS } = await import('../packages/shared/dist/operations/index.js')
+      const readme = await readFile(join(repoRoot, 'README.md'), 'utf8')
+      const count = /\*\*(\d+) tools\*\*/.exec(readme)
+      assert.ok(count, 'README must state its tool count')
+      assert.equal(Number(count[1]), ALL_OPERATIONS.length)
+    })
     await check('tools/list', async () => {
       let cursor
       const seenCursors = new Set()

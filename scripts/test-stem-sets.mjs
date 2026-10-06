@@ -14,8 +14,8 @@ const originalFetch = globalThis.fetch
 let networkAttempts = 0
 globalThis.fetch = async () => { networkAttempts++; throw new Error('Stem set tests forbid network calls') }
 const { getDb, closeDb } = await import('../packages/shared/dist/db.js')
-const { createProject } = await import('../packages/shared/dist/storage/projects.js')
-const { createTrack } = await import('../packages/shared/dist/storage/tracks.js')
+const { createProject, getProjectDirectory } = await import('../packages/shared/dist/storage/projects.js')
+const { createTrack, getTrackDirectory, getTrack, deleteTrack } = await import('../packages/shared/dist/storage/tracks.js')
 const { insertAsset, getAssetStemsDir, getAssetExtractsDir, setAssetTrack, deleteAsset } =
   await import('../packages/shared/dist/storage/assets.js')
 const { createStemSet, listStoredSets, deleteStemSet } = await import('../packages/shared/dist/storage/stem-sets.js')
@@ -36,8 +36,7 @@ async function wav(path) {
 }
 
 const canonical = ['vocals', 'bass', 'kick', 'snare', 'hats', 'toms', 'other']
-async function manifest(name, labels, input, status = 'done') {
-  const folder = join(scratch, 'bridge', name)
+async function manifest(name, labels, input, status = 'done', folder = join(scratch, 'bridge', name)) {
   const outputs = []
   for (const label of labels) outputs.push({ label, path: await wav(join(folder, 'stems', `${label}.wav`)) })
   const data = { command: 'split', status, args: { input }, outputs }
@@ -205,6 +204,14 @@ try {
     { stemKey: 'external', label: 'Bridge', path: external }, { stemKey: 'sibling', label: 'Sibling', path: sibling }
   ] })
   const track = await createTrack(project.id, 'Destination')
+  const foreignOnly = await wav(join(stemsDir, 'foreign-only.wav'))
+  const foreignSet = createStemSet({ ...setParams, name: 'References another asset', sourcePath: moveAudio, lanes: [
+    { stemKey: 'original', label: 'Audio B', path: moveAudio },
+    { stemKey: 'vocals', label: 'Stem B', path: ownStem },
+    { stemKey: 'piano', label: 'Extract B', path: ownExtract },
+    { stemKey: 'foreign', label: 'Only referenced by A', path: foreignOnly }
+  ] })
+  const unregisteredStem = await wav(join(stemsDir, 'unregistered', 'keep.wav'))
   const moved = await setAssetTrack(moving.id, track.id)
   const movedView = getStemView(moving.id)
   const movedLanes = movedView.sets.find((set) => set.kind === 'custom').lanes
@@ -215,7 +222,51 @@ try {
   assert.equal(movedLanes.find((lane) => lane.stemKey === 'custom').path, join(getAssetStemsDir(moved), 'custom', 'nested.wav'))
   assert.equal(movedLanes.find((lane) => lane.stemKey === 'external').path, external)
   assert.equal(movedLanes.find((lane) => lane.stemKey === 'sibling').path, sibling)
+  const foreignMoved = listStoredSets(asset.id).find((set) => set.id === foreignSet.id)
+  assert.equal(foreignMoved.sourcePath, moved.path)
+  assert.deepEqual(foreignMoved.lanes.map((lane) => lane.path), [moved.path,
+    join(getAssetStemsDir(moved), 'vocals.wav'), join(getAssetExtractsDir(moved), 'piano.wav'),
+    join(getAssetStemsDir(moved), 'foreign-only.wav')])
+  assert.ok(foreignMoved.lanes.every((lane) => existsSync(lane.path)))
+  assert.ok(existsSync(unregisteredStem), 'Unknown files in a stem folder must survive an asset move')
   console.log('PASS asset move follows audio/stem/extract files, preserves nested lanes and external paths')
+  console.log('PASS lanes and source paths owned by A follow audio, stems and extracts moved with B')
+
+  const deletedTrack = await createTrack(project.id, 'Track with bridge files')
+  const oldTrackDir = getTrackDirectory(deletedTrack.id)
+  const trackAudio = await wav(join(oldTrackDir, 'tracks', 'input.wav'))
+  const trackAsset = insertAsset({ projectId: project.id, trackId: deletedTrack.id,
+    kind: 'track', name: 'Bridge source', path: trackAudio })
+  const bridge = await manifest('inside-track', canonical, trackAudio, 'done', join(oldTrackDir, 'splits', 'job-1'))
+  const originalJob = await readFile(bridge.path)
+  const trackImport = await importSplitJob({ jobJsonPath: bridge.path, assetId: trackAsset.id })
+  const treeReference = createStemSet({ ...setParams, name: 'Track tree from another asset', sourcePath: oldTrackDir,
+    lanes: [{ stemKey: 'vocals', label: 'Bridge vocal', path: trackImport.set.lanes[0].path }] })
+  const handFile = join(oldTrackDir, 'notes', 'hand-placed.txt')
+  await mkdir(dirname(handFile), { recursive: true })
+  await writeFile(handFile, 'Keep this file exactly')
+  const unknownStem = await wav(join(getAssetStemsDir(trackAsset), 'unregistered', 'keep.wav'))
+  const base = join(getProjectDirectory(project.id), `${deletedTrack.dirName}-files`)
+  await mkdir(base)
+  await writeFile(join(base, 'sentinel.txt'), 'Existing backup')
+  await mkdir(`${base}-2`)
+  await deleteTrack(deletedTrack.id)
+  const destination = `${base}-3`
+  assert.equal(getTrack(deletedTrack.id), null)
+  assert.equal(existsSync(oldTrackDir), false)
+  assert.equal(await readFile(join(destination, 'notes', 'hand-placed.txt'), 'utf8'), 'Keep this file exactly')
+  assert.equal(await readFile(join(base, 'sentinel.txt'), 'utf8'), 'Existing backup')
+  assert.ok(existsSync(join(destination, relative(oldTrackDir, unknownStem))))
+  const preservedImport = listStoredSets(trackAsset.id).find((set) => set.id === trackImport.set.id)
+  assert.equal(preservedImport.sourcePath, join(destination, 'splits', 'job-1', 'job.json'))
+  assert.deepEqual(await readFile(preservedImport.sourcePath), originalJob)
+  assert.deepEqual(preservedImport.lanes.map((lane) => lane.path),
+    trackImport.set.lanes.map((lane) => join(destination, relative(oldTrackDir, lane.path))))
+  assert.ok(preservedImport.lanes.every((lane) => existsSync(lane.path)))
+  const preservedTree = listStoredSets(asset.id).find((set) => set.id === treeReference.id)
+  assert.equal(preservedTree.sourcePath, destination)
+  assert.equal(preservedTree.lanes[0].path, preservedImport.lanes[0].path)
+  console.log('PASS track deletion preserves bridge tree and hand files, rewrites lanes/source, avoids collisions and removes old folder')
 
   const referenced = listStoredSets(asset.id).flatMap((set) => set.lanes.map((lane) => lane.path))
   await deleteAsset(asset.id)
