@@ -104,7 +104,7 @@ For manual write-heavy tests set `AURORA_USER_DATA=%TEMP%\aurora-mcp-test`, neve
 
 ## Publishing
 
-**Version 0.4.0.** To release: bump all three package versions and the exact shared pins in MCP/CLI, `npm install` (lockfile), then `npm run publish:all` at the root (shared, mcp-server, cli in that order). Token: `~/.npmrc`; scope/account details: second-brain `business/operations/account-logins.md`. Packages use `@ericdisero/*`; repository: public `github.com/EricDisero/aurora-mcp`. Smithery config exists but has not been submitted.
+**Version 0.5.0.** To release: bump all three package versions and the exact shared pins in MCP/CLI, `npm install` (lockfile), then `npm run publish:all` at the root (shared, mcp-server, cli in that order). Token: `~/.npmrc`; scope/account details: second-brain `business/operations/account-logins.md`. Packages use `@ericdisero/*`; repository: public `github.com/EricDisero/aurora-mcp`. Smithery config exists but has not been submitted.
 
 ## Skills
 

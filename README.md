@@ -2,7 +2,7 @@
 
 MCP server, CLI and agent skills for Aurora, the AI audio workbench. Agents generate music, organize the local library, split audio into seven stems and extract selected instrument groups. Files land in the project folders shared with the desktop app through SQLite and disk; the app does not need to be running.
 
-Version **0.4.0**: **46 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
+Version **0.5.0**: **46 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
 
 ## What agents can do
 
