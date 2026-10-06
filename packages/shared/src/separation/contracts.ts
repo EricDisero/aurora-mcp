@@ -25,7 +25,7 @@ export interface SeparationResult {
   files: SeparationResultFile[]
 }
 
-/** A provider abstracts ONLY transport + auth. Orchestration (routes, output identity, hats/ee
+/** A provider abstracts ONLY transport + auth. Orchestration (routes, output identity, hats/other
  *  phase-cancellation) lives in the desktop client ABOVE the provider. */
 export interface SeparationProvider {
   /** `uploadName` must be unique per job: MVSEP's job hash is <create second>-<content hash>-<filename>,

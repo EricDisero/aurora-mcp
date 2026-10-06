@@ -4,7 +4,7 @@
 // out transient writer locks.
 //
 // SCHEMA LOCKSTEP RULE: this file mirrors aurora/src/main/database/migrations.ts
-// at schema version 5. If the app migrates past v5, openDb() refuses to write
+// at schema version 6. If the app migrates past v6, openDb() refuses to write
 // with an "update your aurora-mcp packages" error instead of corrupting newer
 // schema assumptions.
 
@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { getDbPath, getUserDataDir } from './paths.js'
 
-const KNOWN_SCHEMA_VERSION = 5
+const KNOWN_SCHEMA_VERSION = 6
 
 let db: Database.Database | null = null
 
@@ -256,6 +256,39 @@ function runMigrations(database: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_project_assets_track ON project_assets(track_id);
       `)
       database.pragma('user_version = 5')
+    })()
+  }
+
+  // v6 — The leftover stem is 'other' (was 'ee'). Verbatim mirror of the app's v6:
+  // project_stems rebuilt for the new CHECK with 'ee' rows relabelled;
+  // extraction_stems 'ee' rows updated in place. Files left where they are.
+  if ((database.pragma('user_version', { simple: true }) as number) < 6) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE project_stems_v6 (
+          id          TEXT PRIMARY KEY,
+          project_id  TEXT NOT NULL,
+          asset_id    TEXT,
+          stem_type   TEXT NOT NULL CHECK(stem_type IN ('vocals','kick','snare','toms','hats','bass','other')),
+          path        TEXT NOT NULL,
+          origin      TEXT NOT NULL CHECK(origin IN ('mvsep','synthesized','imported')),
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        INSERT INTO project_stems_v6 (id, project_id, asset_id, stem_type, path, origin)
+          SELECT id, project_id, asset_id,
+                 CASE WHEN stem_type = 'ee' THEN 'other' ELSE stem_type END,
+                 path, origin
+            FROM project_stems;
+        DROP TABLE project_stems;
+        ALTER TABLE project_stems_v6 RENAME TO project_stems;
+        CREATE INDEX IF NOT EXISTS idx_project_stems_project ON project_stems(project_id);
+        CREATE INDEX IF NOT EXISTS idx_project_stems_asset ON project_stems(asset_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_project_stems_asset_unique
+          ON project_stems(asset_id, stem_type);
+
+        UPDATE extraction_stems SET stem_id = 'other' WHERE stem_id = 'ee';
+      `)
+      database.pragma('user_version = 6')
     })()
   }
 }

@@ -8,8 +8,8 @@ Version **0.4.0**: **37 tools** and **5 skills**. The complete tool surface, par
 
 - Generate tracks, covers, sounds and vocal/instrumental layers through Suno; extend, replace sections and mash up source audio.
 - Create projects and tracks, import audio and references, move assets between tracks and mark favorites.
-- Split an asset into vocals, kick, snare, toms, hats, bass and Everything Else using three measured MVSEP routes plus local phase cancellation. Checked stems land progressively as each route finishes.
-- Extract whole groups, individual instruments and vocal modes. Group ids come from [`GROUP_ROUTES`](packages/shared/src/separation/routes.ts); discover them with `aurora_list_separation_routes` using `surface: "extract group"`. Extraction shares bundled calls and builds Everything Else locally.
+- Split an asset into vocals, kick, snare, toms, hats, bass and Other using three measured MVSEP routes plus local phase cancellation. Checked stems land progressively as each route finishes.
+- Extract whole groups, individual instruments and vocal modes. Group ids come from [`GROUP_ROUTES`](packages/shared/src/separation/routes.ts); discover them with `aurora_list_separation_routes` using `surface: "extract group"`. Extraction shares bundled calls and builds Other locally.
 - Discover route quality/evidence, plan without spending, inspect separation checks, resume jobs and cancel future work. Convert or pitch-shift files locally; RVC/MIDI sidecars require the Aurora repo and their Python dependencies.
 
 Mix, mastering and Export remain interactive desktop flows. An app-control bridge for agents driving the live Mix/Export is deliberately out of scope for now.
@@ -68,6 +68,8 @@ aurora run aurora_check_separation_result --jobId <job-id> --json
 Split and extract default to `background: true`: starting saves a queued manifest before submission. Status defaults to `advance: true`, which can submit the next paid call, poll results and land checked files. `waitSeconds` is 0-30; 0 advances once, while a positive value waits between engine units up to that budget. An interaction already in progress settles before the call stops, so this is not a hard network deadline.
 
 The MCP connection advances only jobs explicitly started or resumed through that connection. On reconnect, call status to resume. CLI callers must keep calling status themselves; the CLI leaves no worker behind. Suno operations support `background: true` but default to blocking, and their initial call submits paid generation immediately. Available `streamUrls` are expiring previews; downloaded files are the durable outputs.
+
+Other (`other`) is the track minus every stem pulled out in that split. New files use `other.wav`. Stem inputs still accept `ee` as a deprecated alias; persisted job ids are normalized when read, while existing file paths stay unchanged.
 
 Jobs move through `queued`, `submitting`, `waiting` and `landing` to `completed`, `partial`, `failed` or `cancelled`. Manifests survive restarts in `<userData>/agent-jobs/`. A partial result retains successful files and diagnostics. Inspect `splitAttempts` or `callResults`, `requestedStemIds`, `extractedFiles`, `detectedKey` and `lastError` before starting replacement work. Failed/partial MCP results set `isError: true` and retain structured output; CLI `--json` exposes the same data under `data`.
 

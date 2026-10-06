@@ -1,6 +1,6 @@
 // Free MCP contract smoke. The SDK handles framing, initialization and RPC errors.
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,7 +65,7 @@ export async function withIsolatedServer(run, { clientName = 'aurora-contract-te
 }
 
 async function smoke() {
-  await withIsolatedServer(async (client) => {
+  await withIsolatedServer(async (client, tempRoot) => {
     const failures = []
     const check = async (name, run) => {
       try {
@@ -132,6 +132,38 @@ async function smoke() {
     await check('empty isolated library', async () => {
       const data = await call('aurora_list_projects')
       assert.deepEqual(data.projects, [], 'a fresh library must contain no projects')
+    })
+    await check('legacy job snapshots relabel ids and retain files', async () => {
+      const jobsDir = join(tempRoot, 'user-data', 'agent-jobs')
+      await mkdir(jobsDir)
+      const legacyPath = join(tempRoot, 'ee.wav')
+      await writeFile(legacyPath, 'existing audio stays in place')
+      for (const kind of ['split', 'extract']) {
+        const attempt = { routeId: 'piano', status: 'landed', deliveredStemIds: ['ee'] }
+        const manifest = {
+          version: 1, jobId: `legacy-${kind}`, kind, status: 'completed',
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          projectId: 'fixture', baseName: 'legacy', params: { stems: ['ee'] },
+          provider: kind === 'split' ? { splitAttempts: { bass: attempt } } : { extract: {
+            calls: [{ id: 'piano', routeId: 'piano' }], callIndex: 1, currentHash: null,
+            extractedFiles: { ee: legacyPath }, requestedStemIds: ['ee'],
+            failures: [], callResults: [attempt]
+          } },
+          landed: { ee: true }, assetIds: [], stems: [{ stemType: 'ee', path: legacyPath }], stage: 'building everything-else'
+        }
+        const manifestPath = join(jobsDir, `${manifest.jobId}.json`)
+        const original = JSON.stringify(manifest)
+        await writeFile(manifestPath, original)
+        const data = await call('aurora_get_job_status', { jobId: manifest.jobId, advance: false })
+        assert.deepEqual(data.stems, [{ stemType: 'other', path: legacyPath }])
+        if (kind === 'extract') {
+          assert.deepEqual(data.extractedFiles, { other: legacyPath })
+          assert.deepEqual(data.requestedStemIds, ['other'])
+          assert.deepEqual(data.callResults[0].deliveredStemIds, ['other'])
+        } else assert.deepEqual(data.splitAttempts.bass.deliveredStemIds, ['other'])
+        assert.equal(await readFile(manifestPath, 'utf8'), original, 'snapshots must not rewrite manifests')
+      }
+      assert.equal(await readFile(legacyPath, 'utf8'), 'existing audio stays in place')
     })
     await check('paid tool refuses missing key with actionable error', async () => {
       const result = await client.callTool({ name: 'aurora_generate', arguments: {

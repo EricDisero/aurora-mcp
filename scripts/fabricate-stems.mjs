@@ -18,7 +18,7 @@ if (!ASSET_ID) {
 const asset = getAsset(ASSET_ID)
 if (!asset) throw new Error(`asset not found: ${ASSET_ID}`)
 const stemsDir = getAssetStemsDir(asset)
-const STEMS = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'ee']
+const STEMS = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'other']
 
 if (CLEAN) {
   getDb().prepare('DELETE FROM project_stems WHERE asset_id = ?').run(ASSET_ID)
@@ -36,7 +36,7 @@ if (CLEAN) {
       assetId: ASSET_ID,
       stemType: st,
       path: p,
-      origin: st === 'hats' || st === 'ee' ? 'synthesized' : 'mvsep'
+      origin: st === 'hats' || st === 'other' ? 'synthesized' : 'mvsep'
     })
   }
   console.log(`fabricated 7 stems for "${asset.name}" in ${stemsDir}`)

@@ -44,8 +44,13 @@ export interface ProjectAsset {
   createdAt: number
 }
 
-export const STEM_TYPES = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'ee'] as const
+export const STEM_TYPES = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'other'] as const
 export type StemType = (typeof STEM_TYPES)[number]
+
+/** Accept the deprecated stem id at persisted-data and agent-input boundaries. */
+export function normalizeStemId(id: string): string {
+  return id === 'ee' ? 'other' : id
+}
 
 export interface ProjectStem {
   id: string
@@ -57,7 +62,7 @@ export interface ProjectStem {
 }
 
 /** A Sample Extractor result stem (schema v2 extraction_stems). stemId is a
- *  catalog id from extract-catalog.ts (piano / vocal_lead / drum_kick / ee…). */
+ *  catalog id from extract-catalog.ts (piano / vocal_lead / drum_kick / other…). */
 export interface ExtractionStem {
   id: string
   projectId: string

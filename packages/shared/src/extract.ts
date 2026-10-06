@@ -3,8 +3,8 @@
 // the job advances ONE provider interaction at a time (submit a call, or poll
 // the in-flight one), so aurora_get_job_status drives a sequential MVSEP plan
 // across process restarts. Dereverb chains its dry vocal into the vocal
-// bundle; EE phase-cancels every delivered stem from the standardized
-// original; a single failed call keeps the run alive with partial results.
+// bundle; Other is the track minus every stem pulled out in that split;
+// a single failed call keeps the run alive with partial results.
 //
 // LOCKSTEP: behavior mirrors the app orchestrator — changes go into both.
 
@@ -206,7 +206,7 @@ export function failExtractCall(state: ExtractJobState, error: unknown): void {
   state.currentHash = null
 }
 
-/** EE synthesis + DB persistence. Runs once after the last call. */
+/** Other synthesis + DB persistence. Runs once after the last call. */
 export async function finalizeExtract(
   asset: ProjectAsset,
   state: ExtractJobState
@@ -217,12 +217,12 @@ export async function finalizeExtract(
 
   const original = await decodeWavFile(state.originalPath)
   const stems = await Promise.all(
-    Object.entries(state.extractedFiles).filter(([id]) => id !== 'ee').map(([, path]) => decodeWavFile(path))
+    Object.entries(state.extractedFiles).filter(([id]) => id !== 'other').map(([, path]) => decodeWavFile(path))
   )
-  const ee = subtractWavs(original, ...stems)
-  const eePath = join(state.extractDir, 'ee.wav')
-  await encodeWavFloat32File(eePath, ee.channels, ee.sampleRate)
-  state.extractedFiles.ee = eePath
+  const other = subtractWavs(original, ...stems)
+  const otherPath = join(state.extractDir, 'other.wav')
+  await encodeWavFloat32File(otherPath, other.channels, other.sampleRate)
+  state.extractedFiles.other = otherPath
 
   const rows: ExtractionStem[] = []
   for (const [stemId, path] of Object.entries(state.extractedFiles)) {

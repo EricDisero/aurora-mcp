@@ -89,7 +89,7 @@ export interface RunRouteOptions {
   onStatus?: (status: string) => void
 }
 
-/** The create-call spec for a route: 32-bit float WAV (the sums and EE phase-cancel need it), its options,
+/** The create-call spec for a route: 32-bit float WAV (the sums and Other phase-cancel need it), its options,
  *  then any overrides. */
 export function routeSpec(route: SeparationRoute, overrides?: Partial<MvsepJobSpec>): MvsepJobSpec {
   return { sep_type: String(route.sepType), output_format: '4', is_demo: '0', ...route.options, ...overrides }

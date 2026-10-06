@@ -53,7 +53,7 @@ export async function createSplitJobs(
   return hashes
 }
 
-/** Land only after exact identity and content checks pass. Retain the drums bus for EE and recovery. */
+/** Land only after exact identity and content checks pass. Retain the drums bus for Other and recovery. */
 export async function landSplitJob(
   job: SplitJobName,
   result: SeparationResult,
@@ -91,10 +91,10 @@ export async function finalizeSplit(asset: ProjectAsset, stemsDir: string): Prom
   const [original, vocals, drums, bass] = await Promise.all(
     ['original', 'vocals', 'drums-bus', 'bass'].map((name) => decodeWavFile(join(stemsDir, `${name}.wav`)))
   )
-  const ee = subtractWavs(original, vocals, drums, bass)
-  const path = join(stemsDir, 'ee.wav')
-  await encodeWavFloat32File(path, ee.channels, ee.sampleRate)
-  return upsertStem({ projectId: asset.projectId, assetId: asset.id, stemType: 'ee', path, origin: 'synthesized' })
+  const other = subtractWavs(original, vocals, drums, bass)
+  const path = join(stemsDir, 'other.wav')
+  await encodeWavFloat32File(path, other.channels, other.sampleRate)
+  return upsertStem({ projectId: asset.projectId, assetId: asset.id, stemType: 'other', path, origin: 'synthesized' })
 }
 
 /** Same durable path as background work; sibling routes settle before a partial failure is reported. */

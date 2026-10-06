@@ -31,7 +31,7 @@ Environment variables override `~/.aurora/config.json`. Alternatively configure 
 
 1. Discover routes with `aurora_list_separation_routes`. Filter `surface: "extract group"` for whole groups; route data includes exact options/output keys, checks, measured quality and evidence. The extract schema derives selectable stems from the catalog.
 2. Plan with `aurora_split` or `aurora_extract` and `estimateOnly: true`. This is free and returns the exact call topology and duration-based provider units.
-3. After authorizing spend, start split/extract once. Both default to `background: true`, saving a queued manifest before any submission. Splits deliver vocals, kick, snare, toms, hats, bass and Everything Else; extraction supports groups, instruments, vocal modes and dereverb, sharing bundled calls where possible.
+3. After authorizing spend, start split/extract once. Both default to `background: true`, saving a queued manifest before any submission. Splits deliver vocals, kick, snare, toms, hats, bass and Other; extraction supports groups, instruments, vocal modes and dereverb, sharing bundled calls where possible.
 4. Call `aurora_get_job_status` with the returned `jobId` and optional `waitSeconds` (0-30). Default `advance: true` can submit paid calls and land files. With 0 it advances once; a positive value bounds waiting between units, while an in-flight interaction settles. Use `advance: false` or `aurora_list_jobs` for free local snapshots.
 5. Inspect terminal status and `aurora_check_separation_result` before replacement paid work. `completed`, `partial`, `failed` and `cancelled` are terminal; active states are `queued`, `submitting`, `waiting` and `landing`. Failed/partial tool results set `isError: true` while retaining outputs and structured diagnostics.
 
@@ -49,7 +49,7 @@ Family tests cover drums/percussion, bass and vocals/choir. Brass, woodwinds, st
 
 ## Costs and free checks
 
-Suno generation/cover/layering/editing and provider WAV conversion spend credits. MVSEP submissions spend premium minutes per planned call; advancing a queued job can spend. Plans, route discovery, local result checks, job snapshots/cancellation and local library/audio work are free. Everything Else is computed locally. `aurora_get_credits` reads provider balances without spending; extract estimates label future Aurora metering separately from provider units. Existing active splits or seven valid stems are reused. Asset/project deletion requires `confirm: true`.
+Suno generation/cover/layering/editing and provider WAV conversion spend credits. MVSEP submissions spend premium minutes per planned call; advancing a queued job can spend. Plans, route discovery, local result checks, job snapshots/cancellation and local library/audio work are free. Other is computed locally. `aurora_get_credits` reads provider balances without spending; extract estimates label future Aurora metering separately from provider units. Existing active splits or seven valid stems are reused. Asset/project deletion requires `confirm: true`.
 
 From the repository root, with dependencies installed:
 

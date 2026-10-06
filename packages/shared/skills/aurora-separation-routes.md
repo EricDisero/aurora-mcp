@@ -11,7 +11,7 @@ Choose the part and the route before spending. A family hub means its **group mo
 
 1. `aurora_list_separation_routes` lists the current routes, exact delivered stem ids, options, quality and evidence. Read it before selecting a route.
 2. `aurora_extract` selects groups or instruments using the catalog ids below. Call with `estimateOnly: true` first to see the call plan without spending; check `aurora_get_credits` and obtain authorization for that plan before running it.
-3. `aurora_split` makes the fixed seven stems: `vocals`, `kick`, `snare`, `toms`, `hats`, `bass`, `ee`. Use extraction when only a group or a few parts are needed.
+3. `aurora_split` makes the fixed seven stems: `vocals`, `kick`, `snare`, `toms`, `hats`, `bass`, `other`. Use extraction when only a group or a few parts are needed.
 4. `aurora_check_separation_result` checks files already on disk without submitting another MVSEP job. Read the tool schema for its required input and output files; a delivered stem alone may omit the complement or bus needed for the checks.
 
 Example extraction selection: `stems: ["drums_full", "choir", "brass"]`. Each group is one job. `vocals_all` is also a group stem id; the vocal bundle ids below are selected through `vocalMode` instead.
@@ -75,7 +75,7 @@ Other individual `stems` ids, available when the material and goal justify them:
 - Percussion: `bells`, `congas`, `tambourine`, `marimba`, `glockenspiel`, `timpani`, `triangle`, `wind_chimes`.
 - Low end / electronic: `bass`, `synth`.
 
-Extraction also delivers `ee` (Everything Else) locally for free; it is not a paid selection. The route tool and `packages/shared/src/extract-catalog.ts` are the current contract for ids and plans.
+Extraction also delivers `other` (Other) locally for free: the track minus every stem pulled out in that split. It is not a paid selection. The route tool and `packages/shared/src/extract-catalog.ts` are the current contract for ids and plans.
 
 ## Checks before saving
 

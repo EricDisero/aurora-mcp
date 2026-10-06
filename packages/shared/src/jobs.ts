@@ -30,7 +30,7 @@ import {
   submitNextExtractCall,
   type ExtractJobState
 } from './extract.js'
-import { STEM_TYPES, type JobError, type SeparationAttempt } from './types.js'
+import { STEM_TYPES, normalizeStemId, type JobError, type SeparationAttempt } from './types.js'
 
 const JOB_STATUSES = ['queued', 'submitting', 'waiting', 'landing', 'completed', 'partial', 'failed', 'cancelled'] as const
 export type JobStatus = (typeof JOB_STATUSES)[number]
@@ -91,6 +91,22 @@ function jobPath(jobId: string): string {
   return join(getJobsDir(), `${jobId}.json`)
 }
 
+/** Old manifests name the leftover stem 'ee': read it as 'other'. Paths and provider handles are untouched. */
+function normalizeJobStemIds(m: JobManifest): void {
+  const rekey = <T>(value: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(value).map(([id, data]) => [normalizeStemId(id), data]))
+  m.landed = rekey(m.landed)
+  for (const stem of m.stems) stem.stemType = normalizeStemId(stem.stemType)
+  const state = m.provider.extract
+  if (state) {
+    state.extractedFiles = rekey(state.extractedFiles)
+    state.requestedStemIds = state.requestedStemIds?.map(normalizeStemId)
+  }
+  for (const attempt of [...Object.values(m.provider.splitAttempts ?? {}), ...(state?.callResults ?? [])]) {
+    if (attempt) attempt.deliveredStemIds = attempt.deliveredStemIds.map(normalizeStemId)
+  }
+}
+
 export async function saveJob(m: JobManifest): Promise<void> {
   const path = jobPath(m.jobId)
   m.version = 1
@@ -125,6 +141,7 @@ export async function loadJob(jobId: string): Promise<JobManifest | null> {
       !state.extractedFiles || !Array.isArray(state.failures))) throw new Error('Invalid extraction state')
     // Older manifests planned by the independent catalog have ids but no routeId.
     if (state) for (const call of state.calls) call.routeId ??= call.id
+    normalizeJobStemIds(m)
     await applyCancellation(m)
     return m
   } catch (error) {
@@ -521,12 +538,12 @@ async function advanceSplit(m: JobManifest, signal?: AbortSignal): Promise<void>
 
   if (names.every((name) => attempts[name]!.status === 'landed')) {
     if (await stopped(m, signal)) return
-    if (!m.landed.ee) {
-      m.status = 'landing'; m.stage = 'building everything-else'; await saveJob(m)
+    if (!m.landed.other) {
+      m.status = 'landing'; m.stage = 'building Other'; await saveJob(m)
       if (await stopped(m, signal)) return
       const row = await finalizeSplit(asset, stemsDir)
       m.stems.push({ stemType: row.stemType, path: row.path })
-      m.landed.ee = true
+      m.landed.other = true
     }
     m.status = 'completed'; m.stage = 'complete — 7 checked stems landed'
     delete m.lastError
@@ -596,7 +613,7 @@ async function advanceSplit(m: JobManifest, signal?: AbortSignal): Promise<void>
 /** Advance the extract state machine by ONE provider interaction: submit the
  *  next planned call, or poll the in-flight one and land its files. A failed
  *  call is recorded and skipped (partial results survive — prism behavior);
- *  after the last call, EE synthesis + DB persistence finalize the run. */
+ *  after the last call, Other synthesis + DB persistence finalize the run. */
 async function advanceExtract(m: JobManifest, signal?: AbortSignal): Promise<void> {
   const state = m.provider.extract
   if (!state) throw new Error('Extract job manifest is incomplete')
@@ -615,7 +632,7 @@ async function advanceExtract(m: JobManifest, signal?: AbortSignal): Promise<voi
 
   // All calls settled → finalize once.
   if (state.callIndex >= total) {
-    m.status = 'landing'; m.stage = 'building everything-else'; await saveJob(m)
+    m.status = 'landing'; m.stage = 'building Other'; await saveJob(m)
     if (await stopped(m, signal)) return
     const rows = await finalizeExtract(asset, state)
     m.stems = rows.map((r) => ({ stemType: r.stemId, path: r.path }))

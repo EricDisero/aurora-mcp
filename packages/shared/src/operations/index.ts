@@ -78,7 +78,7 @@ import { SPLIT_ROUTES } from '../separation/routes.js'
 import { probeDurationSeconds, standardizeToWav, convertToMp3, pitchShift } from '../audio/ffmpeg.js'
 import { runRipMidi, runRvcUpscale } from '../sidecars.js'
 import { SKILLS } from '../skills/content.js'
-import type { JobError, ProjectAsset, SeparationAttempt } from '../types.js'
+import { normalizeStemId, type JobError, type ProjectAsset, type SeparationAttempt } from '../types.js'
 
 export interface OperationProgress {
   progress: number
@@ -171,6 +171,8 @@ const EXTRACT_SELECTION_IDS = [...new Set([
   ...Object.keys(EXTRACT_INDIVIDUAL_STEMS),
   ...Object.values(EXTRACT_BUNDLES).flatMap((bundle) => bundle.stems)
 ])].filter((id) => !VOCAL_STEM_IDS.has(id))
+
+const stemIdSchema = z.string().transform(normalizeStemId)
 
 function separationPlan(routeIds: string[], durationSeconds: number | null, topology?: unknown[]): Record<string, unknown> {
   const routes = listSeparationRoutes()
@@ -1773,7 +1775,7 @@ const splitOp: Operation<{ assetId: string; background?: boolean; estimateOnly?:
   id: 'aurora_split',
   annotations: { title: 'Split seven stems', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   outputSchema: outputSchema(jobSchema.or(planSchema)),
-  description: 'Split an asset into seven checked stems using three measured MVSEP routes plus local phase cancellation. PAID: uploads audio and spends MVSEP premium minutes; estimateOnly:true is free. background defaults true and queues durable work. Existing valid stems or an active split are reused without another submission. Returns a job with per-route attempts. Five stems come from MVSEP (vocals, kick, snare, toms, bass); two are built locally: hats = the DrumSep drums bus minus kick, snare and toms, and ee ("Inst", everything else) = the original minus vocals, drums bus and bass. Advance with aurora_get_job_status, then check with aurora_check_separation_result.',
+  description: 'Split an asset into seven checked stems using three measured MVSEP routes plus local phase cancellation. PAID: uploads audio and spends MVSEP premium minutes; estimateOnly:true is free. background defaults true and queues durable work. Existing valid stems or an active split are reused without another submission. Returns a job with per-route attempts. Five stems come from MVSEP (vocals, kick, snare, toms, bass); two are built locally: hats = the DrumSep drums bus minus kick, snare and toms, and other (Other) = the track minus every stem pulled out in that split. Advance with aurora_get_job_status, then check with aurora_check_separation_result.',
   input: z.object({
     assetId: z.string().describe('Asset id from aurora_list_assets'),
     background: z.boolean().default(true).describe('true queues work; false waits up to 12 minutes with progress'),
@@ -1785,7 +1787,7 @@ const splitOp: Operation<{ assetId: string; background?: boolean; estimateOnly?:
       if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
       const durationSeconds = await probeDurationSeconds(asset.path)
       return ok(separationPlan(Object.values(SPLIT_ROUTES).map((route) => route.id), durationSeconds),
-        'Free split plan: three MVSEP calls plus local hats/everything-else calculation. Nothing submitted.')
+        'Free split plan: three MVSEP calls plus local hats/Other calculation. Nothing submitted.')
     }
     const active = (await listJobs()).find((job) => job.kind === 'split' &&
       job.provider.assetId === input.assetId && isJobActive(job))
@@ -1813,13 +1815,13 @@ const extractOp: Operation<{
   id: 'aurora_extract',
   annotations: { title: 'Extract selected stems', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   outputSchema: outputSchema(jobSchema.or(planSchema)),
-  description: "PAID MVSEP extraction of catalog groups, instruments and vocal modes from assetId, up to 12 minutes. stems defaults empty, vocalMode absent and includeReverb false; Everything Else is free local phase cancellation. estimateOnly:true is free and returns exact route topology/options, quality/evidence and duration confidence. Otherwise uploads source audio and spends credits per planned call; bundles share calls, dereverb chains dry vocals. background defaults true and queues a durable plan; false advances with progress. Returns attempts, requested/delivered files, detectedKey and partial failures. Advance aurora_get_job_status, then aurora_check_separation_result.",
+  description: "PAID MVSEP extraction of catalog groups, instruments and vocal modes from assetId, up to 12 minutes. stems defaults empty, vocalMode absent and includeReverb false; Other is free local phase cancellation. estimateOnly:true is free and returns exact route topology/options, quality/evidence and duration confidence. Otherwise uploads source audio and spends credits per planned call; bundles share calls, dereverb chains dry vocals. background defaults true and queues a durable plan; false advances with progress. Returns attempts, requested/delivered files, detectedKey and partial failures. Advance aurora_get_job_status, then aurora_check_separation_result.",
   input: z.object({
     assetId: z.string().describe('The asset to extract from (any kind)'),
     stems: z
       .array(z.enum(EXTRACT_SELECTION_IDS as [string, ...string[]]))
       .optional()
-      .describe(`Non-vocal catalog stem ids: ${EXTRACT_SELECTION_IDS.join(', ')}. Vocal stems come from vocalMode/includeReverb; ee is free and automatic.`),
+      .describe(`Non-vocal catalog stem ids: ${EXTRACT_SELECTION_IDS.join(', ')}. Vocal stems come from vocalMode/includeReverb; Other is free and automatic.`),
     vocalMode: z.enum(['lead_back', 'male_female']).optional().describe(VOCAL_MODE_DESCRIBE),
     includeReverb: z
       .boolean()
@@ -1852,7 +1854,7 @@ const extractOp: Operation<{
 
     if (input.estimateOnly) {
       return ok({ ...routePlan, estimate, stemsToDeliver: plan.stemsToDeliver },
-        `Free plan: ${plannedCalls} MVSEP call(s). Duration ${duration === null ? 'unknown; price units cannot be estimated' : `${duration}s`}. Everything Else is local. Nothing submitted.`)
+        `Free plan: ${plannedCalls} MVSEP call(s). Duration ${duration === null ? 'unknown; price units cannot be estimated' : `${duration}s`}. Other is local. Nothing submitted.`)
     }
     assertNotAborted(context)
 
@@ -2019,7 +2021,7 @@ const rvcUpscaleOp: Operation<{
   description: "Free local RVC Python sidecar: supply WAV path or assetId plus stemType (default vocals), model defaults jb and f0UpKey defaults 0. Requires AURORA_REPO and installed sidecar dependencies. Writes/overwrites sibling _upscaled.wav; returns outputPath. No provider upload or credits. Import output with aurora_import_file if wanted in the library.",
   input: z.object({
     assetId: z.string().optional().describe('Asset whose vocals stem to upscale'),
-    stemType: z.string().optional().describe('Stem to pick from the asset (default "vocals")'),
+    stemType: stemIdSchema.optional().describe('Stem to pick from the asset (default "vocals"). Use other for Other; ee is a deprecated alias.'),
     path: z.string().optional().describe('OR a direct WAV path'),
     model: z.string().optional().describe("'jb' (default) or 'purposeaudacity'"),
     f0UpKey: z.number().optional().describe('Pitch shift in semitones (default 0)')
@@ -2058,7 +2060,7 @@ const ripMidiOp: Operation<{
   description: "Free local MIDI transcription: WAV path or assetId plus required stemType; mode defaults auto, optional instrument hints routing (drums onset, mono CREPE, poly Basic Pitch). Requires AURORA_REPO and sidecar dependencies. Writes/overwrites sibling .mid and returns outputPath. No upload or credits. Open the MIDI in the DAW.",
   input: z.object({
     assetId: z.string().optional(),
-    stemType: z.string().optional().describe('Which stem of the asset (e.g. "bass", "kick")'),
+    stemType: stemIdSchema.optional().describe('Which stem of the asset (e.g. "bass", "kick", "other"). ee is a deprecated alias for other.'),
     path: z.string().optional(),
     mode: z.enum(['poly', 'mono', 'auto']).optional().describe('Transcription path (default auto)'),
     instrument: z.string().optional().describe('Instrument hint for auto-routing, e.g. "bass", "kick"')
@@ -2091,7 +2093,7 @@ const listSeparationRoutesOp: Operation<{ surface?: string; group?: string }> = 
   description: 'Free, local route discovery: returns every measured route with MVSEP algorithm, exact options/output keys, checks, quality, evidence and surface. Optional surface selects split or an extract category; group matches a route id, stem id or stem prefix. Nothing uploads or spends credits. Use aurora_split estimateOnly:true or aurora_extract estimateOnly:true to plan, then explicitly run the paid tool.',
   input: z.object({
     surface: z.enum(['split', 'extract group', 'extract instrument', 'extract bundle']).optional(),
-    group: z.string().optional().describe('Route id, delivered stem id or stem prefix (for example drum or guitar)')
+    group: stemIdSchema.optional().describe('Route id, delivered stem id or stem prefix (for example drum or guitar). ee is a deprecated alias for other.')
   }),
   async run(input) {
     const routes = listSeparationRoutes().filter((route) => (!input.surface || route.surface === input.surface) &&

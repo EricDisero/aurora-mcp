@@ -97,12 +97,12 @@ export interface PlannedApiCall {
 
 export interface ExtractPlan {
   calls: PlannedApiCall[]
-  /** Stem ids this run delivers (ALWAYS ends with 'ee' — free, local, undeselectable). */
+  /** Stem ids this run delivers (ALWAYS ends with 'other' — free, local, undeselectable). */
   stemsToDeliver: string[]
 }
 
 /** Port of sample_worker.plan_api_calls — convert a selection into the
- *  optimized MVSEP call plan. EE is always delivered (local phase-cancel). */
+ *  optimized MVSEP call plan. Other is always delivered (local phase-cancel). */
 export function planApiCalls(selection: ExtractSelection): ExtractPlan {
   const calls: PlannedApiCall[] = []
   const stemsToDeliver: string[] = []
@@ -188,8 +188,8 @@ export function planApiCalls(selection: ExtractSelection): ExtractPlan {
     }
   }
 
-  // EE is always generated and delivered (free, local).
-  stemsToDeliver.push('ee')
+  // Other is always generated and delivered (free, local).
+  stemsToDeliver.push('other')
 
   return { calls, stemsToDeliver }
 }
@@ -321,7 +321,7 @@ export const EXTRACT_STEM_LABELS: Record<string, string> = {
   wind_chimes: 'Wind Chimes',
   bass: 'Bass',
   synth: 'Synth',
-  ee: 'Everything Else'
+  other: 'Other'
 }
 
 /** Upload/duration caps — prism's cost protection, adopted. */

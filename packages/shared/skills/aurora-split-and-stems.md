@@ -7,7 +7,7 @@ description: How Aurora's checked 7-stem split works (3 measured MVSEP routes + 
 
 ## The 7 stems
 
-`vocals, kick, snare, toms, hats, bass, ee` (everything-else). Only 5 come from MVSEP; **hats** and **ee** are synthesized locally by phase cancellation (hats = drums − kick − snare − toms; ee = original − vocals − drums − bass). The split's `hats` is the remaining drum bus, including cymbals and residual; use extraction's `drum_hihats` for the dedicated hi-hat output. EE lands last.
+`vocals, kick, snare, toms, hats, bass, other` (Other). Only 5 come from MVSEP; **hats** and **other** are synthesized locally by phase cancellation (hats = drums − kick − snare − toms; Other = the track minus every stem pulled out in that split). The split's `hats` is the remaining drum bus, including cymbals and residual; use extraction's `drum_hihats` for the dedicated hi-hat output. Other lands last.
 
 For one group, use `aurora_extract` instead: `drums_full` for unpitched drums/orchestral percussion, `choir`, `vocals_all`, `brass`, `woodwind`, `strings`, `keys`, `guitar`, or `percussion` when pitched percussion is wanted too. A family hub is its group model in one job. Load `aurora-separation-routes` and call `aurora_list_separation_routes` for grades, evidence and granularity limits. Stop at the strings/brass group on dense orchestral material.
 
@@ -18,7 +18,7 @@ For one group, use `aurora_extract` instead: `drums_full` for unpitched drums/or
 - vocals job → `vocals`
 - drums job → `kick`, `snare`, `toms`, `hats`
 - bass job → `bass`
-- all three done → `ee`
+- all three done → `other`
 
 With `background: true`, `aurora_get_job_status` shows the per-job landing state — the user can start auditioning early stems while the rest cook. Typical total: 3-5 minutes (longer if the MVSEP queue is busy — free-tier keys run 1 concurrent job, so the 3 jobs may serialize).
 

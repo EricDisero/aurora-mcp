@@ -45,7 +45,7 @@ export function probeDurationSeconds(inputPath: string): Promise<number | null> 
 }
 
 /** Standardize an arbitrary input to 44.1kHz stereo 32-bit float WAV — the
- *  single preprocessed format fed to MVSEP jobs and the `ee` phase-cancel
+ *  single preprocessed format fed to MVSEP jobs and the `other` phase-cancel
  *  reference (aurora's standardizeToWav, verbatim args). */
 export async function standardizeToWav(inputPath: string, outputPath: string): Promise<void> {
   await runFfmpeg(['-y', '-i', inputPath, '-ac', '2', '-ar', '44100', '-c:a', 'pcm_f32le', outputPath])
