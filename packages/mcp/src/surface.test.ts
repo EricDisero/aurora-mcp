@@ -39,7 +39,7 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 37)
+  assert.equal(tools.length, 41)
   for (const tool of tools) {
     assert.ok(tool.description && tool.description.length <= 2048, tool.name)
     assert.equal(typeof tool.annotations?.title, 'string')

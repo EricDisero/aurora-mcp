@@ -37,7 +37,7 @@ aurora-mcp/
 
 - **Never duplicate operation logic.** Both surfaces register the same `ALL_OPERATIONS` array. New tool = one edit in `packages/shared/src/operations/index.ts`.
 - **Op schemas expose the FULL wire surface with sane defaults — curation is the app's job, never the MCP's** (locked 2026-06-10; the agent layer ships with MORE control than the app, never less). Param contract for the Suno ops: `docs/suno-param-surface.md`.
-- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` through v6 (leftover stem id `other`; existing WAV paths stay unchanged). `KNOWN_SCHEMA_VERSION` refuses newer DBs. Port every new app migration here in the same session and bump that constant.
+- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` through v7 (v6: leftover stem id `other`, WAV paths unchanged; v7: stored `stem_sets` and `stem_lanes`). `KNOWN_SCHEMA_VERSION` refuses newer DBs. Port every new app migration here in the same session and bump that constant.
 - **Storage-semantics lockstep.** `storage/*.ts` ports the app's modules; behavior changes go into BOTH codebases or neither. Split/extract orchestration consumes the app's generated separation contract (table below).
 - **Never edit separation mirrors.** `packages/shared/src/separation/*.ts` and `extract-catalog.ts` are GENERATED from the app by `scripts/sync-separation.mjs` (with ESM import adaptation/provider-interface extraction). Fix the app, then resync. `--check` runs in `npm run typecheck`; drift fails the check.
 - **Check before landing.** Use canonical exact-key resolution and route content checks, never substring/list-order matching. Every submission uses a unique upload name. Failed identity/content checks save no stems for that route. A check pass is not proof of musical purity; report family/replay limits.
@@ -58,6 +58,8 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 | aurora_get_credits | `tools/bridge/lib/kie.ts getRemainingCredits` + MVSEP `/api/app/user` (live-docs verified 2026-06-10) |
 | aurora_get_workspace_state / list_projects / create_project / rename_project / delete_project | `src/main/storage/projects.ts` |
 | aurora_list_assets / import_file / add_reference / delete_asset | `src/main/storage/assets.ts` (+`references.ts`) |
+| aurora_get_stem_view / create_stem_set / delete_stem_set | `src/main/storage/stem-view.ts` + `stem-sets.ts`; split/extraction derived, stored sets reference files in place. Deletes require confirmation and remove rows only. |
+| aurora_import_split_job | `src/main/ingest/split-job.ts`; completed bridge jobs, canonical lanes only, legacy `ee` wins over intermediate `other`, repeated imports reuse the set. Free and local. |
 | aurora_create/list/rename/delete_track / set_asset_track / favorite_asset | `src/main/storage/tracks.ts` + `assets.ts setAssetTrack/setAssetFavorite` (moves file/stems/extracts and reference paths) |
 | aurora_fetch_wav | `suno-client.ts createWavConversion/pollWavConversion` + report §Phase 3 ("asset re-points at WAV, MP3 stays") |
 | aurora_generate | `ipc/generation.ts generation:generate` landing + `kie.ts createGeneration` |
@@ -88,6 +90,7 @@ npm run typecheck        # mirror --check → build shared → check MCP/CLI
 npm run smoke            # isolated stdio protocol checks, free
 npm run test:contract    # isolated MCP audio contracts, free
 npm run test:surface     # offline operation surface checks, free
+npm run test:stem-sets   # isolated storage/read/import fixtures, free
 node packages/cli/dist/index.js status
 ```
 

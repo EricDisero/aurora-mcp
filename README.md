@@ -2,12 +2,13 @@
 
 MCP server, CLI and agent skills for Aurora, the AI audio workbench. Agents generate music, organize the local library, split audio into seven stems and extract selected instrument groups. Files land in the project folders shared with the desktop app through SQLite and disk; the app does not need to be running.
 
-Version **0.4.0**: **37 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
+Version **0.4.0**: **41 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
 
 ## What agents can do
 
 - Generate tracks, covers, sounds and vocal/instrumental layers through Suno; extend, replace sections and mash up source audio.
 - Create projects and tracks, import audio and references, move assets between tracks and mark favorites.
+- Read separate split, extraction, imported and custom stem sets; register completed bridge split jobs or hand-made sets without copying files or spending.
 - Split an asset into vocals, kick, snare, toms, hats, bass and Other using three measured MVSEP routes plus local phase cancellation. Checked stems land progressively as each route finishes.
 - Extract whole groups, individual instruments and vocal modes. Group ids come from [`GROUP_ROUTES`](packages/shared/src/separation/routes.ts); discover them with `aurora_list_separation_routes` using `surface: "extract group"`. Extraction shares bundled calls and builds Other locally.
 - Discover route quality/evidence, plan without spending, inspect separation checks, resume jobs and cancel future work. Convert or pitch-shift files locally; RVC/MIDI sidecars require the Aurora repo and their Python dependencies.
@@ -95,7 +96,7 @@ Drums/percussion, bass and vocals/choir have family checks. Brass, woodwinds, st
 
 Suno generation, covers, layering, editing and provider WAV conversion spend credits. MVSEP submissions spend premium minutes per planned call. Separation status advancement may initiate that spend; queuing alone does not. Split/extract `estimateOnly: true` returns exact routes/options and duration-based provider units without submitting. The extract estimate's Aurora `credits` field is future metering, not a current provider price.
 
-Route discovery, local checks, job snapshots/cancellation, library operations and local audio processing do not spend provider credits. `aurora_get_credits` is a free network balance read. Existing active split work or seven valid stems are reused without another submission. Deleting assets/projects requires `confirm: true`.
+Route discovery, local checks, job snapshots/cancellation, library operations and local audio processing do not spend provider credits. `aurora_get_credits` is a free network balance read. Existing active split work or seven valid stems are reused without another submission. Deleting assets/projects or stored stem-set rows requires `confirm: true`.
 
 ## Development and free tests
 
@@ -107,6 +108,7 @@ npm run typecheck
 npm run smoke
 npm run test:contract
 npm run test:surface
+npm run test:stem-sets
 ```
 
 The tests use isolated libraries and offline fixtures; no Suno/MVSEP spend. `npm run typecheck` checks mirror drift, builds shared declarations and checks MCP/CLI. It needs the Aurora app checkout beside this repo, or `AURORA_REPO` pointing to it.

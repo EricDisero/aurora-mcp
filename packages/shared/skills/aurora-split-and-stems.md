@@ -35,6 +35,14 @@ Each job has a unique upload name. Aurora verifies the returned algorithm, exact
 - For extraction, call `aurora_extract` with `estimateOnly: true` before authorizing the plan; groups and bundles each count once.
 - Any asset kind splits: generations, covers, imports, AND references (split-a-reference is a first-class loop for studying an arrangement).
 
+## Read and register stem sets
+
+`aurora_get_stem_view({assetId})` is a free local read of separate Split, Extraction, imported and custom sets. Each lane reports its label, drum group, order and whether the file exists now. Split and Extraction come from their existing stem tables; extraction shows the latest result per stem id. Choose one set at a time: sets can contain overlapping audio.
+
+Use `aurora_import_split_job({jobJsonPath, assetId?, name?})` to register a completed bridge `split` job.json without copying files or spending. It matches the manifest input to an asset when assetId is omitted. Only the seven canonical stems become lanes. Legacy `ee` is the real Other leftover and takes precedence over the overlapping non-bass `other` intermediate. Original, instrumental, crash and ride are skipped with reasons (hats already includes cymbals). Reimporting the same job returns its existing set.
+
+Use `aurora_create_stem_set({assetId, name, lanes:[{stemKey, label?, path}]})` for a hand-made set. Paths must be absolute and exist; stem keys must be unique. Labels default to the split or extraction label, then the stem key. Lanes retain input order with Other shown last. `aurora_delete_stem_set({setId, confirm:true})` removes only stored set and lane rows, never referenced files. Get the UUID from the view's `set:<id>` key. These tools are free and local.
+
 ## On disk
 
 Stems live at `<project>/stems/<asset-slug>-<id6>/*.wav` — 32-bit float, sample-aligned by construction. They are DAW-ready files: pitch them (`aurora_pitch_shift`), rip MIDI from them (`aurora_rip_midi`), drag them into the DAW, or point the user at the folder.

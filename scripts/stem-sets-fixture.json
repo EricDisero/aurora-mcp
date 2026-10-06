@@ -1,0 +1,64 @@
+{
+  "command": "split",
+  "status": "ok",
+  "createdAt": "2026-10-06T16:50:49.689Z",
+  "finishedAt": "2026-10-06T16:54:27.002Z",
+  "durationMs": 217313,
+  "args": {
+    "input": "input.wav",
+    "out": "splits"
+  },
+  "outputs": [
+    {
+      "label": "original",
+      "path": "stems/original.wav"
+    },
+    {
+      "label": "vocals",
+      "path": "stems/vocals.wav"
+    },
+    {
+      "label": "kick",
+      "path": "stems/kick.wav"
+    },
+    {
+      "label": "snare",
+      "path": "stems/snare.wav"
+    },
+    {
+      "label": "toms",
+      "path": "stems/toms.wav"
+    },
+    {
+      "label": "bass",
+      "path": "stems/bass.wav"
+    },
+    {
+      "label": "instrumental",
+      "path": "stems/instrumental.wav"
+    },
+    {
+      "label": "other",
+      "path": "stems/other.wav"
+    },
+    {
+      "label": "crash",
+      "path": "stems/crash.wav"
+    },
+    {
+      "label": "ride",
+      "path": "stems/ride.wav"
+    },
+    {
+      "label": "hats",
+      "path": "stems/hats.wav"
+    },
+    {
+      "label": "ee",
+      "path": "stems/ee.wav"
+    }
+  ],
+  "notes": [
+    "\"vocals\" is nearly silent here: this group may not be in the track"
+  ]
+}

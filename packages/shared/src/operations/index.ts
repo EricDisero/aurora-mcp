@@ -64,10 +64,14 @@ import {
   renameTrack
 } from '../storage/tracks.js'
 import { getProjectStems, getStems } from '../storage/stems.js'
+import { getStemView } from '../storage/stem-view.js'
+import { createStemSet, deleteStemSet } from '../storage/stem-sets.js'
+import { importSplitJob } from '../ingest/split-job.js'
 import { advanceJob, cancelJob, isJobActive, listJobs, loadJob, newJobManifest, saveJob, startSplitJob, type JobManifest } from '../jobs.js'
 import { prepareExtract } from '../extract.js'
 import {
   EXTRACT_BUNDLES,
+  EXTRACT_STEM_LABELS,
   EXTRACT_INDIVIDUAL_STEMS,
   VOCAL_STEM_IDS,
   estimateExtractCost,
@@ -78,7 +82,7 @@ import { SPLIT_ROUTES } from '../separation/routes.js'
 import { probeDurationSeconds, standardizeToWav, convertToMp3, pitchShift } from '../audio/ffmpeg.js'
 import { runRipMidi, runRvcUpscale } from '../sidecars.js'
 import { SKILLS } from '../skills/content.js'
-import { normalizeStemId, type JobError, type ProjectAsset, type SeparationAttempt } from '../types.js'
+import { STEM_LABELS, normalizeStemId, type StemType, type JobError, type ProjectAsset, type SeparationAttempt } from '../types.js'
 
 export interface OperationProgress {
   progress: number
@@ -132,6 +136,18 @@ const assetSchema = z.object({ id: z.string(), projectId: z.string(), trackId: z
   origin: z.record(z.unknown()).nullable().optional(), sourceAssetId: z.string().nullable().optional(),
   refId: z.string().nullable().optional(), favorite: z.boolean(), createdAt: z.number() }).passthrough()
 const stemSchema = z.object({ stemType: z.string(), path: z.string() }).passthrough()
+const stemLaneSchema = z.object({ stemKey: z.string(), label: z.string(), path: z.string() })
+const storedSetSchema = z.object({
+  id: z.string(), projectId: z.string(), assetId: z.string(), kind: z.enum(['import', 'custom']),
+  name: z.string(), sourcePath: z.string().nullable(), createdAt: z.number(),
+  lanes: z.array(stemLaneSchema.extend({ id: z.string(), setId: z.string(), sortOrder: z.number() }))
+})
+const stemViewSchema = z.object({
+  asset: z.object({ id: z.string(), projectId: z.string(), trackId: z.string().nullable(), name: z.string(), path: z.string() }),
+  sets: z.array(z.object({ key: z.string(), kind: z.enum(['split', 'extraction', 'import', 'custom']), name: z.string(),
+    lanes: z.array(stemLaneSchema.extend({ laneId: z.string(), available: z.boolean(),
+      group: z.literal('drums').nullable(), sortOrder: z.number() })) }))
+})
 const attemptSchema = z.object({
   routeId: z.string(), status: z.enum(['pending', 'submitting', 'accepted', 'landed', 'failed', 'uncertain']),
   hash: z.string().optional(), deliveredStemIds: z.array(z.string()), error: errorSchema.optional(),
@@ -726,6 +742,69 @@ const deleteAssetOp: Operation<{ assetId: string; confirm?: boolean }> = {
     if (!input.confirm) throw new Error(`Confirmation required: confirm:true deletes asset "${asset.name}", ${asset.path}, its stems and linked reference.`)
     await deleteAsset(input.assetId)
     return ok({ deleted: asset.id }, `Deleted asset "${asset.name}".`)
+  }
+}
+
+const getStemViewOp: Operation<{ assetId: string }> = {
+  id: 'aurora_get_stem_view',
+  annotations: { title: 'Read asset stem sets', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(stemViewSchema),
+  description: 'Free local read: assetId returns the asset and separate split, extraction, imported and custom stem sets. Lanes include labels, drum groups, ordering and current file availability. No provider calls or writes. Choose one set at a time; combining sets would overlap audio. Use aurora_import_split_job or aurora_create_stem_set to register existing files.',
+  input: z.object({ assetId: z.string().min(1).describe('Asset id from aurora_list_assets') }),
+  async run(input) {
+    const view = getStemView(input.assetId)
+    return ok({ ...view }, `Found ${view.sets.length} stem sets for "${view.asset.name}".`)
+  }
+}
+
+const importSplitJobOp: Operation<{ jobJsonPath: string; assetId?: string; name?: string }> = {
+  id: 'aurora_import_split_job',
+  annotations: { title: 'Register bridge split job', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ set: storedSetSchema, reused: z.boolean(),
+    skipped: z.array(z.object({ label: z.string(), path: z.string(), reason: z.string() })) })),
+  description: 'Free local write: jobJsonPath registers a completed bridge split as an import set, referencing files in place. Never copies, re-splits or spends. Omit assetId to match args.input to a library asset. Legacy ee becomes Other and supersedes the non-bass other intermediate; original, instrumental, crash and ride are skipped with reasons. Reimporting the same manifest for an asset returns its existing set. Inspect with aurora_get_stem_view.',
+  input: z.object({
+    jobJsonPath: z.string().min(1).describe('Path to the completed bridge split job.json'),
+    assetId: z.string().min(1).optional().describe('Target asset; otherwise match manifest args.input'),
+    name: z.string().trim().min(1).optional().describe('Set name; defaults to the job folder name')
+  }),
+  async run(input) {
+    const result = await importSplitJob(input)
+    return ok({ ...result }, `${result.reused ? 'Reused' : 'Registered'} "${result.set.name}" with ${result.set.lanes.length} lanes; skipped ${result.skipped.length} overlapping or auxiliary outputs.`)
+  }
+}
+
+const createStemSetOp: Operation<{ assetId: string; name: string; lanes: Array<{ stemKey: string; label?: string; path: string }> }> = {
+  id: 'aurora_create_stem_set',
+  annotations: { title: 'Register custom stem set', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ set: storedSetSchema })),
+  description: 'Free local write: assetId, name and lanes register a custom set of existing audio files in place. Each lane needs a unique stemKey and absolute existing path; optional label defaults to its split or extraction label, then stemKey. Input lane order is retained, with Other shown last. Never copies, moves, deletes files or spends credits. Sets are separate audio alternatives; inspect with aurora_get_stem_view.',
+  input: z.object({ assetId: z.string().min(1), name: z.string().trim().min(1),
+    lanes: z.array(z.object({ stemKey: z.string().trim().min(1), label: z.string().optional(),
+      path: z.string().min(1).describe('Absolute path to an existing local audio file') })).min(1) }),
+  async run(input) {
+    const asset = getAsset(input.assetId)
+    if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
+    const set = createStemSet({ projectId: asset.projectId, assetId: asset.id, kind: 'custom', name: input.name,
+      lanes: input.lanes.map((lane) => {
+        const stemKey = normalizeStemId(lane.stemKey)
+        return { ...lane, stemKey, label: lane.label ?? STEM_LABELS[stemKey as StemType] ?? EXTRACT_STEM_LABELS[stemKey] ?? stemKey }
+      }) })
+    return ok({ set }, `Registered custom stem set "${set.name}" with ${set.lanes.length} lanes.`)
+  }
+}
+
+const deleteStemSetOp: Operation<{ setId: string; confirm?: boolean }> = {
+  id: 'aurora_delete_stem_set',
+  annotations: { title: 'Delete stored stem set rows', readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(z.object({ deleted: z.string() })),
+  description: 'Free destructive local write: setId and confirm:true remove an imported or custom stem set and its lane rows. Referenced files are never deleted. Split and extraction sets are derived and cannot be deleted with this operation. Read aurora_get_stem_view and strip the set: prefix to get setId. Without confirmation returns CONFIRMATION_REQUIRED.',
+  input: z.object({ setId: z.string().min(1),
+    confirm: z.boolean().optional().describe('Must be true. Confirm the row deletion with the user before calling.') }),
+  async run(input) {
+    if (!input.confirm) throw new Error(`Confirmation required: confirm:true deletes stored stem set ${input.setId} and its lane rows; files remain.`)
+    deleteStemSet(input.setId)
+    return ok({ deleted: input.setId }, `Deleted stem set ${input.setId}; referenced files remain.`)
   }
 }
 
@@ -2208,6 +2287,10 @@ const operationDefinitions = [
   importFileOp,
   addReferenceOp,
   deleteAssetOp,
+  getStemViewOp,
+  importSplitJobOp,
+  createStemSetOp,
+  deleteStemSetOp,
   fetchWavOp,
   generateOp,
   soundsOp,

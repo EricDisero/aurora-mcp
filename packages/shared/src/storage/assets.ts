@@ -1,7 +1,7 @@
 // Port of aurora/src/main/storage/assets.ts — identical kind subfolders, asset
 // rows, stems-dir naming, and delete semantics.
 
-import { join, basename, extname } from 'node:path'
+import { join, basename, dirname, extname, relative, isAbsolute } from 'node:path'
 import { mkdir, rm, copyFile, rename } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { v4 as uuidv4 } from 'uuid'
@@ -9,6 +9,7 @@ import { getDb } from '../db.js'
 import { getProjectDirectory, slugify, touchProject } from './projects.js'
 import { getTrackDirectory } from './tracks.js'
 import { deleteReference } from './references.js'
+import { deleteSetsForAsset } from './stem-sets.js'
 import type { AssetKind, ProjectAsset } from '../types.js'
 
 const KIND_DIRS: Record<AssetKind, string> = {
@@ -196,10 +197,23 @@ async function moveFile(src: string, dest: string): Promise<void> {
 async function moveAssetSubdir(oldDir: string, newDir: string, paths: string[]): Promise<void> {
   if (!paths.length || !existsSync(oldDir)) return
   await mkdir(newDir, { recursive: true })
-  for (const oldPath of paths) {
-    if (existsSync(oldPath)) await moveFile(oldPath, join(newDir, basename(oldPath)))
+  for (const oldPath of new Set(paths)) {
+    const dest = movedSubdirPath(oldDir, newDir, oldPath)
+    if (existsSync(oldPath)) {
+      await mkdir(dirname(dest), { recursive: true })
+      await moveFile(oldPath, dest)
+    }
   }
   await rm(oldDir, { recursive: true, force: true }).catch(() => {})
+}
+
+function livesUnder(dir: string, path: string): boolean {
+  const rel = relative(dir, path)
+  return !!rel && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\')
+}
+
+function movedSubdirPath(oldDir: string, newDir: string, path: string): string {
+  return join(newDir, livesUnder(oldDir, path) ? relative(oldDir, path) : basename(path))
 }
 
 /** Re-file an asset to a track (or null = unfiled). Physically relocates the
@@ -224,20 +238,28 @@ export async function setAssetTrack(id: string, trackId: string | null): Promise
   const newStemsDir = getAssetStemsDir(moved)
   const newExtractsDir = getAssetExtractsDir(moved)
 
+  const storedLanes = db.prepare(`SELECT l.id, l.path FROM stem_lanes l
+    JOIN stem_sets s ON s.id = l.set_id WHERE s.asset_id = ?`).all(id) as Array<{ id: string; path: string }>
+  const storedStems = storedLanes.filter((r) => livesUnder(oldStemsDir, r.path))
+  const storedExtracts = storedLanes.filter((r) => livesUnder(oldExtractsDir, r.path))
+
   const stemRows = db
     .prepare('SELECT id, path FROM project_stems WHERE asset_id = ?')
     .all(id) as Array<{ id: string; path: string }>
-  await moveAssetSubdir(oldStemsDir, newStemsDir, stemRows.map((r) => r.path))
+  const movesStems = existsSync(oldStemsDir) && !!(stemRows.length || storedStems.length)
+  await moveAssetSubdir(oldStemsDir, newStemsDir, [...stemRows, ...storedStems].map((r) => r.path))
 
   const extractRows = db
     .prepare('SELECT id, path FROM extraction_stems WHERE asset_id = ?')
     .all(id) as Array<{ id: string; path: string }>
-  await moveAssetSubdir(oldExtractsDir, newExtractsDir, extractRows.map((r) => r.path))
+  const movesExtracts = existsSync(oldExtractsDir) && !!(extractRows.length || storedExtracts.length)
+  await moveAssetSubdir(oldExtractsDir, newExtractsDir, [...extractRows, ...storedExtracts].map((r) => r.path))
 
   // A linked reference_tracks row (copy:false — its audio_path IS the asset's
   // file) must follow the move too, or analyze breaks after re-filing.
   const setStem = db.prepare('UPDATE project_stems SET path = ? WHERE id = ?')
   const setExtract = db.prepare('UPDATE extraction_stems SET path = ? WHERE id = ?')
+  const setLane = db.prepare('UPDATE stem_lanes SET path = ? WHERE id = ?')
   db.transaction(() => {
     db.prepare('UPDATE project_assets SET track_id = ?, path = ? WHERE id = ?').run(
       target,
@@ -251,8 +273,16 @@ export async function setAssetTrack(id: string, trackId: string | null): Promise
         asset.path
       )
     }
-    for (const r of stemRows) setStem.run(join(newStemsDir, basename(r.path)), r.id)
-    for (const r of extractRows) setExtract.run(join(newExtractsDir, basename(r.path)), r.id)
+    for (const r of stemRows) setStem.run(movedSubdirPath(oldStemsDir, newStemsDir, r.path), r.id)
+    for (const r of extractRows) setExtract.run(movedSubdirPath(oldExtractsDir, newExtractsDir, r.path), r.id)
+    for (const r of storedLanes) {
+      if (!relative(asset.path, r.path)) setLane.run(newPath, r.id)
+      else if (movesStems && livesUnder(oldStemsDir, r.path)) {
+        setLane.run(movedSubdirPath(oldStemsDir, newStemsDir, r.path), r.id)
+      } else if (movesExtracts && livesUnder(oldExtractsDir, r.path)) {
+        setLane.run(movedSubdirPath(oldExtractsDir, newExtractsDir, r.path), r.id)
+      }
+    }
   })()
 
   touchProject(asset.projectId)
@@ -266,9 +296,12 @@ export async function deleteAsset(id: string): Promise<void> {
   if (!asset) return
 
   const db = getDb()
-  db.prepare('DELETE FROM project_stems WHERE asset_id = ?').run(id)
-  db.prepare('DELETE FROM extraction_stems WHERE asset_id = ?').run(id)
-  db.prepare('DELETE FROM project_assets WHERE id = ?').run(id)
+  db.transaction(() => {
+    deleteSetsForAsset(id)
+    db.prepare('DELETE FROM project_stems WHERE asset_id = ?').run(id)
+    db.prepare('DELETE FROM extraction_stems WHERE asset_id = ?').run(id)
+    db.prepare('DELETE FROM project_assets WHERE id = ?').run(id)
+  })()
 
   await rm(asset.path, { force: true }).catch(() => {})
   await rm(getAssetStemsDir(asset), { recursive: true, force: true }).catch(() => {})

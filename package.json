@@ -12,6 +12,7 @@
     "smoke": "node scripts/smoke-mcp.mjs",
     "test:contract": "node scripts/test-mcp-contract.mjs",
     "test:surface": "node --test packages/mcp/dist/surface.test.js",
+    "test:stem-sets": "node scripts/test-stem-sets.mjs",
     "clean": "rimraf packages/*/dist",
     "publish:all": "npm run build && npm publish -w packages/shared --access public && npm publish -w packages/mcp --access public && npm publish -w packages/cli --access public"
   },

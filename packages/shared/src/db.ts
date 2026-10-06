@@ -4,7 +4,7 @@
 // out transient writer locks.
 //
 // SCHEMA LOCKSTEP RULE: this file mirrors aurora/src/main/database/migrations.ts
-// at schema version 6. If the app migrates past v6, openDb() refuses to write
+// at schema version 7. If the app migrates past v7, openDb() refuses to write
 // with an "update your aurora-mcp packages" error instead of corrupting newer
 // schema assumptions.
 
@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { getDbPath, getUserDataDir } from './paths.js'
 
-const KNOWN_SCHEMA_VERSION = 6
+const KNOWN_SCHEMA_VERSION = 7
 
 let db: Database.Database | null = null
 
@@ -289,6 +289,40 @@ function runMigrations(database: Database.Database): void {
         UPDATE extraction_stems SET stem_id = 'other' WHERE stem_id = 'ee';
       `)
       database.pragma('user_version = 6')
+    })()
+  }
+
+  // v7 — Stored stem sets (imported bridge jobs, hand-made sets). Verbatim mirror
+  // of the app's v7. Split and extraction sets stay derived from their own tables.
+  if ((database.pragma('user_version', { simple: true }) as number) < 7) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS stem_sets (
+          id           TEXT PRIMARY KEY,
+          project_id   TEXT NOT NULL,
+          asset_id     TEXT NOT NULL,
+          kind         TEXT NOT NULL CHECK(kind IN ('import','custom')),
+          name         TEXT NOT NULL,
+          source_path  TEXT,
+          created_at   INTEGER NOT NULL,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_stem_sets_asset ON stem_sets(asset_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_stem_sets_source
+          ON stem_sets(asset_id, source_path) WHERE source_path IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS stem_lanes (
+          id          TEXT PRIMARY KEY,
+          set_id      TEXT NOT NULL,
+          stem_key    TEXT NOT NULL,
+          label       TEXT NOT NULL,
+          path        TEXT NOT NULL,
+          sort_order  INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (set_id) REFERENCES stem_sets(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_stem_lanes_set ON stem_lanes(set_id);
+      `)
+      database.pragma('user_version = 7')
     })()
   }
 }

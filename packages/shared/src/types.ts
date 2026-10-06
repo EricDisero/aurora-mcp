@@ -1,6 +1,6 @@
 // Aurora domain types — mirrored from aurora/src/shared/types/index.ts (the
 // locked contract). The MCP works against the SAME DB + project folders as the
-// app, so these shapes must stay in lockstep with the app's schema v2.
+// app, so these shapes must stay in lockstep with its schema.
 
 export interface Project {
   id: string
@@ -46,6 +46,80 @@ export interface ProjectAsset {
 
 export const STEM_TYPES = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'other'] as const
 export type StemType = (typeof STEM_TYPES)[number]
+
+export const STEM_LABELS: Record<StemType, string> = {
+  vocals: 'Vocals', kick: 'Kick', snare: 'Snare', toms: 'Toms',
+  hats: 'Hats', bass: 'Bass', other: 'Other'
+}
+
+export interface StemLaneInput {
+  stemKey: string
+  label: string
+  path: string
+}
+
+export interface StoredStemLane extends StemLaneInput {
+  id: string
+  setId: string
+  sortOrder: number
+}
+
+export interface StoredStemSet {
+  id: string
+  projectId: string
+  assetId: string
+  kind: 'import' | 'custom'
+  name: string
+  sourcePath: string | null
+  createdAt: number
+  lanes: StoredStemLane[]
+}
+
+export interface CreateStemSetParams {
+  projectId: string
+  assetId: string
+  kind: 'import' | 'custom'
+  name: string
+  sourcePath?: string
+  lanes: StemLaneInput[]
+}
+
+export interface CreateStemSetRequest {
+  assetId: string
+  name: string
+  lanes: { stemKey: string; label?: string; path: string }[]
+}
+
+export interface LaneView extends StemLaneInput {
+  laneId: string
+  available: boolean
+  group: 'drums' | null
+  sortOrder: number
+}
+
+export interface StemSetView {
+  key: string
+  kind: 'split' | 'extraction' | 'import' | 'custom'
+  name: string
+  lanes: LaneView[]
+}
+
+export interface StemView {
+  asset: { id: string; projectId: string; trackId: string | null; name: string; path: string }
+  sets: StemSetView[]
+}
+
+export interface ImportSplitJobRequest {
+  jobJsonPath: string
+  assetId?: string
+  name?: string
+}
+
+export interface ImportSplitJobResult {
+  set: StoredStemSet
+  reused: boolean
+  skipped: Array<{ label: string; path: string; reason: string }>
+}
 
 /** Accept the deprecated stem id at persisted-data and agent-input boundaries. */
 export function normalizeStemId(id: string): string {
