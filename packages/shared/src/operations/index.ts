@@ -66,6 +66,7 @@ import {
 } from '../storage/tracks.js'
 import { getProjectStems, getStems } from '../storage/stems.js'
 import { getStemView } from '../storage/stem-view.js'
+import { getStemPeaks, measureStems, exportStems } from '../stem-tools.js'
 import { createStemSet, deleteStemSet } from '../storage/stem-sets.js'
 import { importSplitJob } from '../ingest/split-job.js'
 import { advanceJob, cancelJob, isJobActive, listJobs, loadJob, newJobManifest, saveJob, startSplitJob, type JobManifest } from '../jobs.js'
@@ -783,6 +784,67 @@ const getStemViewOp: Operation<{ assetId: string }> = {
     const view = getStemView(input.assetId)
     return ok({ ...view }, `Found ${view.sets.length} stem sets for "${view.asset.name}".`)
   }
+}
+
+const stemSelectionShape = {
+  assetId: z.string().min(1).describe('Asset id from aurora_list_assets'),
+  setKey: z.string().min(1).describe('Exact split, extraction or set:<id> key from aurora_get_stem_view'),
+  laneIds: z.array(z.string().min(1)).min(1).optional().describe('Exact laneIds from that set; omit for all lanes'),
+  startSeconds: z.number().finite().min(0).optional().describe('Range start in seconds, default 0; rounded to nearest frame'),
+  endSeconds: z.number().finite().positive().optional().describe('Exclusive range end; omit for full duration; rounded to nearest frame')
+}
+const measuredRangeSchema = z.object({
+  startSeconds: z.number(), endSeconds: z.number(), startFrame: z.number().int(),
+  endFrame: z.number().int(), frames: z.number().int()
+})
+const stemPeaksInput = z.object({ ...stemSelectionShape,
+  laneIds: stemSelectionShape.laneIds.unwrap().max(16).optional(),
+  points: z.number().int().min(1).max(2000).default(400).describe('Number of min/max bins per lane (1-2000, default 400)')
+}).strict()
+const getStemPeaksOp: Operation<z.input<typeof stemPeaksInput>> = {
+  id: 'aurora_get_stem_peaks',
+  annotations: { title: 'Read stem waveform peaks', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  input: stemPeaksInput,
+  outputSchema: outputSchema(z.object({ assetId: z.string(), setKey: z.string(), points: z.number().int(),
+    lanes: z.array(z.object({ laneId: z.string(), sampleRate: z.number(), durationSeconds: z.number(),
+      measuredRange: measuredRangeSchema, peaks: z.array(z.tuple([z.number().finite(), z.number().finite()])).max(2000) })).max(16) })),
+  description: 'Free local waveform read without the desktop app: select assetId, one setKey and optional laneIds from aurora_get_stem_view. Returns exactly points [min,max] bins per lane over the requested range, native sampleRate and full-file durationSeconds. Default 400, maximum 2000 points and 16 lanes; larger selections are refused. Each frame uses the signed channel sample with greatest absolute amplitude (max-abs across channels); bins store its min/max without mono-sum cancellation. Empty bins repeat the nearest frame. Timing rounds to sample frames; invalid/out-of-file ranges and missing lanes fail. WAV is decoded locally; other audio uses bundled ffmpeg with no network. Use measure_stems for levels or export_stems for files.',
+  async run(input) { return ok(await getStemPeaks({ ...input, points: input.points ?? 400 })) }
+}
+const measureStemsInput = z.object(stemSelectionShape).strict()
+const measureStemsOp: Operation<z.infer<typeof measureStemsInput>> = {
+  id: 'aurora_measure_stems',
+  annotations: { title: 'Measure stem loudness', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  input: measureStemsInput,
+  outputSchema: outputSchema(z.object({ assetId: z.string(), setKey: z.string(), lanes: z.array(z.object({
+    laneId: z.string(), sampleRate: z.number(), samplePeakDbfs: z.number().finite().nullable(),
+    rmsDbfs: z.number().finite().nullable(), integratedLufs: z.number().finite().nullable(),
+    truePeakDbtp: z.number().finite().nullable(), silent: z.boolean(), measuredRange: measuredRangeSchema
+  })) })),
+  description: 'Free local mono/stereo stem measurement without the desktop app. Select assetId, one setKey and optional laneIds from aurora_get_stem_view; optional timing rounds to native-rate frames and must be inside each file. Returns sample peak (max across channels), RMS (mean channel energy), integrated LUFS per ITU-R BS.1770-4 (native-rate K-weighting, 400 ms blocks, 75% overlap, -70 LUFS absolute and -10 LU relative gates), and true peak from 4x 64-tap windowed-sinc oversampling with zero-padded edges. Digital silence has silent:true and null dB values, never -Infinity. LUFS is also null for ranges shorter than 400 ms or fully below the gates; silent stays false for nonzero audio. Surround is refused because channel roles are unavailable. No network, uploads or credit spend. Use export_stems to bake selected gains into a local mix.',
+  async run(input) { return ok(await measureStems(input)) }
+}
+const exportStemsInput = z.object({ ...stemSelectionShape,
+  mode: z.enum(['originals', 'mix', 'range']),
+  gains: z.record(z.number().finite()).optional().describe('Mix only: selected laneId -> gain in dB (default 0); gain is baked in'),
+  mutes: z.array(z.string().min(1)).optional().describe('Mix only: muted selected laneIds; solos override mutes'),
+  solos: z.array(z.string().min(1)).optional().describe('Mix only: if nonempty, only these selected lanes play, even when muted'),
+  outDir: z.string().min(1).describe('Absolute output directory; existing files are never overwritten')
+}).strict()
+const exportStemsOp: Operation<z.infer<typeof exportStemsInput>> = {
+  id: 'aurora_export_stems',
+  annotations: { title: 'Export local stem files', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  input: exportStemsInput,
+  outputSchema: outputSchema(z.object({ manifestPath: z.string(), manifest: z.object({
+    mode: z.enum(['originals', 'mix', 'range']), assetId: z.string(), setKey: z.string(),
+    lanes: z.array(z.object({ laneId: z.string(), stemKey: z.string(), label: z.string(), sourcePath: z.string(),
+      path: z.string(), audible: z.boolean(), gainDb: z.number(), sampleRate: z.number(), frames: z.number().int() })),
+    range: measuredRangeSchema.nullable(), gainsApplied: z.record(z.number()), sampleRate: z.number().nullable(),
+    frames: z.number().int().nullable(), paths: z.array(z.string()), peak: z.number().nullable(),
+    peakDbfs: z.number().finite().nullable(), clipping: z.boolean()
+  }) })),
+  description: 'Free local file write without the desktop app: assetId, one setKey, mode and absolute outDir; select optional laneIds from aurora_get_stem_view. originals copies selected files byte-for-byte; range writes aligned per-lane 44.1 kHz float32 WAVs; mix sums audible lanes into one 44.1 kHz float32 WAV. Gain is baked in for mix. gains defaults 0 dB, mutes/solos empty; any solos form an exclusive set and override mute. These controls require mix; originals refuses timing. Range/mix share a nearest-frame start and length, defaulting to the longest selected lane; shorter lanes are zero-padded. Channels are preserved; mix duplicates mono into the common layout and otherwise requires matching channel counts. No limiter or normalisation: float headroom is retained, peak and clipping (>1) are reported for mix. Returns files and a written JSON manifest with lanes, applied gains, range, rate, frames and paths (originals has per-lane rates/lengths). Existing names receive suffixes using exclusive writes; repeating creates more files. No upload, spend or library mutation.',
+  async run(input, context) { return ok(await exportStems(input, () => assertNotAborted(context))) }
 }
 
 const importSplitJobOp: Operation<{ jobJsonPath: string; assetId?: string; name?: string }> = {
@@ -2318,6 +2380,9 @@ const operationDefinitions = [
   addReferenceOp,
   deleteAssetOp,
   getStemViewOp,
+  getStemPeaksOp,
+  measureStemsOp,
+  exportStemsOp,
   importSplitJobOp,
   createStemSetOp,
   deleteStemSetOp,

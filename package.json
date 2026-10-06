@@ -14,6 +14,7 @@
     "test:surface": "node --test packages/mcp/dist/surface.test.js",
     "test:agent-bridge": "node scripts/test-agent-bridge.mjs",
     "test:stem-sets": "node scripts/test-stem-sets.mjs",
+    "test:stem-tools": "node scripts/test-stem-tools.mjs",
     "clean": "rimraf packages/*/dist",
     "publish:all": "npm run build && npm publish -w packages/shared --access public && npm publish -w packages/mcp --access public && npm publish -w packages/cli --access public"
   },

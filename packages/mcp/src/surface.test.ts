@@ -39,7 +39,14 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 43)
+  assert.equal(tools.length, 46)
+  for (const name of ['aurora_get_stem_peaks', 'aurora_measure_stems', 'aurora_export_stems']) {
+    const tool = tools.find((tool) => tool.name === name)!
+    assert.ok(tool, `${name} listed on first request`)
+    assert.equal(tool.annotations!.readOnlyHint, name !== 'aurora_export_stems')
+    assert.equal(tool.annotations!.openWorldHint, false)
+    assert.equal(tool.annotations!.destructiveHint, false)
+  }
   assert.ok(tools.some((tool) => tool.name === 'aurora_get_view'))
   assert.ok(tools.some((tool) => tool.name === 'aurora_set_view'))
   for (const tool of tools) {
@@ -95,6 +102,21 @@ try {
   const imported = await callTool({ name: 'aurora_import_file', arguments: { projectId, filePath: audioPath } })
   assert.ok(!imported.isError)
   const assetId = (imported.structuredContent?.asset as { id: string }).id
+  const stemSet = await callTool({ name: 'aurora_create_stem_set', arguments: {
+    assetId, name: 'Local stems', lanes: [{ stemKey: 'silent', path: audioPath }]
+  } })
+  const setKey = `set:${(stemSet.structuredContent?.set as { id: string }).id}`
+  const peaks = await callTool({ name: 'aurora_get_stem_peaks', arguments: { assetId, setKey } })
+  assert.ok(!peaks.isError)
+  assert.equal((peaks.structuredContent?.lanes as Array<{ peaks: unknown[] }>)[0].peaks.length, 400)
+  const levels = await callTool({ name: 'aurora_measure_stems', arguments: { assetId, setKey } })
+  assert.ok(!levels.isError)
+  assert.equal((levels.structuredContent?.lanes as Array<{ integratedLufs: number | null }>)[0].integratedLufs, null)
+  const exported = await callTool({ name: 'aurora_export_stems', arguments: {
+    assetId, setKey, mode: 'mix', outDir: join(scratch, 'exports')
+  } })
+  assert.ok(!exported.isError)
+  assert.equal((exported.structuredContent?.manifest as { peak: number }).peak, 0)
   const splitPlan = await callTool({ name: 'aurora_split', arguments: { assetId, estimateOnly: true } })
   assert.ok(!splitPlan.isError)
   assert.equal(splitPlan.structuredContent?.totalCalls, 3)

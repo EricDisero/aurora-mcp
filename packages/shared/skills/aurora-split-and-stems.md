@@ -1,6 +1,6 @@
 ---
 name: aurora-split-and-stems
-description: How Aurora's checked 7-stem split works (3 measured MVSEP routes + phase cancellation), progressive landing, cost rules and files. Use when calling aurora_split or working with split stems; load aurora-separation-routes to choose group extraction instead.
+description: Checked 7-stem splitting, stem sets, offline waveform/loudness measurement and originals/range/mix export. Use when calling aurora_split or measuring/exporting stems without the desktop app; load aurora-separation-routes to choose group extraction.
 ---
 
 # Aurora Split & Stems
@@ -43,8 +43,20 @@ Use `aurora_import_split_job({jobJsonPath, assetId?, name?})` to register a comp
 
 Use `aurora_create_stem_set({assetId, name, lanes:[{stemKey, label?, path}]})` for a hand-made set. Paths must be absolute and exist; stem keys must be unique. Labels default to the split or extraction label, then the stem key. Lanes retain input order with Other shown last. `aurora_delete_stem_set({setId, confirm:true})` removes only stored set and lane rows, never referenced files. Get the UUID from the view's `set:<id>` key. These tools are free and local.
 
+## Measure and export without the desktop app
+
+First call `aurora_get_stem_view({assetId})`, choose one exact `setKey` (`split`, `extraction` or `set:<id>`) and take `laneIds` from its lanes. Omit laneIds to select all lanes. Unknown IDs and missing files fail rather than silently dropping a lane. These tools are free, local and require no running desktop or provider keys.
+
+- `aurora_get_stem_peaks({assetId, setKey, laneIds?, startSeconds?, endSeconds?, points?})` returns native-rate min/max bins of the signed sample with the greatest absolute amplitude across channels, so opposite-phase stereo does not disappear. Default 400 bins, maximum 2000 and 16 lanes per call. Full-file duration and the measured frame range accompany each lane. Empty bins repeat the nearest sample.
+- `aurora_measure_stems({assetId, setKey, laneIds?, startSeconds?, endSeconds?})` returns sample peak, mean-channel RMS, BS.1770-4 integrated LUFS and 4x oversampled true peak. K-weighting runs at the file's rate; loudness uses 400 ms blocks with 75% overlap, -70 LUFS absolute and -10 LU relative gates. Mono/stereo only: surround channel roles are unavailable. Digital silence has `silent:true` and null levels. Below-gate or sub-400 ms audio has null LUFS but `silent:false` if nonzero. For a -20 dBFS peak 997 Hz sine, mono is about -23 LUFS, identical stereo about -20 LUFS: channel energies add.
+- `aurora_export_stems({assetId, setKey, mode, outDir, laneIds?, gains?, mutes?, solos?, startSeconds?, endSeconds?})` writes audio plus a JSON manifest, returning their paths. outDir must be absolute. Every existing name receives a suffix; nothing is overwritten or registered in the library.
+
+Use `mode:'originals'` for byte-identical whole-file copies. Timing and gain/mute/solo controls are refused for originals. `mode:'range'` trims each lane to a shared start and length in 44.1 kHz float32 WAV; it preserves levels and refuses mix controls. `mode:'mix'` sums audible lanes into one 44.1 kHz float32 WAV: **gain is baked in**, keyed by laneId in dB (default 0). Any solos select the exclusive audible set and override mute; with no solos, all unmuted selected lanes play. All muted renders silence. Controls must name selected lanes.
+
+Range and mix timings round to the nearest 44.1 kHz frame; default start is zero and end is the longest selected lane's duration. Shorter lanes are zero-padded. Channels are retained; mono is duplicated when mixed with stereo, and other channel-count mismatches fail. Measurement/peaks timing must be inside each lane. Read the manifest's actual range, applied gains, per-lane audibility, rate, frames and paths. Originals has per-lane rates and frame counts instead of one shared rate/length. Mix reports sample peak and `clipping:true` above ±1; float headroom is retained. There is no limiter or normalisation. Reduce gain explicitly if desired, then export again.
+
 ## On disk
 
 Stems live at `<project>/stems/<asset-slug>-<id6>/*.wav` — 32-bit float, sample-aligned by construction. They are DAW-ready files: pitch them (`aurora_pitch_shift`), rip MIDI from them (`aurora_rip_midi`), drag them into the DAW, or point the user at the folder.
 
-Mastering against a reference (analyze → mix → export) happens in the Aurora app window from any split set — not agent-drivable yet.
+Offline measurement and stem/mix export use the tools above. Reference matching and real-time mastering still use the Aurora app window.

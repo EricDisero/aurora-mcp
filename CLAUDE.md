@@ -60,6 +60,7 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 | aurora_get_workspace_state / list_projects / create_project / rename_project / delete_project | `src/main/storage/projects.ts` |
 | aurora_list_assets / import_file / add_reference / delete_asset | `src/main/storage/assets.ts` (+`references.ts`) |
 | aurora_get_stem_view / create_stem_set / delete_stem_set | `src/main/storage/stem-view.ts` + `stem-sets.ts`; split/extraction derived, stored sets reference files in place. Deletes require confirmation and remove rows only. |
+| aurora_get_stem_peaks / measure_stems / export_stems | Local `stem-tools.ts` reads exact sets/lanes from `storage/stem-view.ts`; native-rate decoding, `audio/loudness.ts` BS.1770-4 mono/stereo + 4x true peak. Free/offline; peaks bounded to 2000 points/16 lanes. Exports write originals or aligned 44.1 kHz float32 ranges/mixes and manifests without overwriting. Mix gain is baked in; exclusive solos override mute; clipping is reported without limiting/normalisation. |
 | aurora_import_split_job | `src/main/ingest/split-job.ts`; completed bridge jobs, canonical lanes only, legacy `ee` wins over intermediate `other`, repeated imports reuse the set. Free and local. |
 | aurora_create/list/rename/delete_track / set_asset_track / favorite_asset | `src/main/storage/tracks.ts` + `assets.ts setAssetTrack/setAssetFavorite` (moves file/stems/extracts and reference paths) |
 | aurora_fetch_wav | `suno-client.ts createWavConversion/pollWavConversion` + report §Phase 3 ("asset re-points at WAV, MP3 stays") |
@@ -80,7 +81,7 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 
 Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
 
-**Scope:** Stack was removed from both projects. Generic navigation, working-asset selection and Library folder/checkbox selection use the live bridge. Stem-lane controls and Mix/mastering/Export actions remain follow-ups. Historical Stack reference: second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
+**Scope:** Stack was removed from both projects. Generic navigation, working-asset selection and Library folder/checkbox selection use the live bridge. Offline stem measurements and exports use the local tools above; live stem-lane controls and mastering remain follow-ups. Historical Stack reference: second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
 
 ## Build / test
 
@@ -93,6 +94,7 @@ npm run test:contract    # isolated MCP audio contracts, free
 npm run test:surface     # offline operation surface checks, free
 npm run test:agent-bridge # fake loopback desktop + actual command queue, no Electron
 npm run test:stem-sets   # isolated storage/read/import fixtures, free
+npm run test:stem-tools  # synthetic waveform/loudness/export fixtures, offline
 node packages/cli/dist/index.js status
 ```
 
