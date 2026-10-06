@@ -10,6 +10,7 @@
 import { join, extname, basename, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { z } from 'zod'
+import { AuroraDesktopClient, viewCommandSchema, viewReadSchema, viewAckSchema } from '../clients/desktop.js'
 import { v4 as uuidv4 } from 'uuid'
 import { getDbPath, getProjectsDirectory, getUserDataDir } from '../paths.js'
 import { getMvsepKey, getSunoKey, getKieKey } from '../config.js'
@@ -91,6 +92,7 @@ export interface OperationProgress {
 }
 
 export interface OperationContext {
+  desktop?: () => AuroraDesktopClient
   signal?: AbortSignal
   onProgress?: (progress: OperationProgress) => void | Promise<void>
 }
@@ -215,6 +217,32 @@ function separationPlan(routeIds: string[], durationSeconds: number | null, topo
 // Root objects are required by MCP. The engine's additive provenance fields are preserved.
 function outputSchema(success: z.ZodType): z.ZodType {
   return z.union([success, z.object({ error: errorSchema }).passthrough()])
+}
+
+const getViewOp: Operation<Record<string, never>> = {
+  id: 'aurora_get_view',
+  description: 'Read what the running Aurora desktop window reports: route, open working asset, Library checkbox selection, active panel, project, track folder, revision and observation time. No provider calls. A stopped app returns desktop app not connected and state:null; a window that has not reported also returns state:null. Read before changing the view and use its revision as expectedRevision.',
+  input: z.object({}).strict(),
+  outputSchema: outputSchema(viewReadSchema),
+  annotations: { title: 'Read desktop view', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async run(_input, context) {
+    const data = await (context?.desktop?.() ?? new AuroraDesktopClient()).getView()
+    return { ...ok(data, data.state ? `Aurora shows ${data.state.activePanel} on ${data.state.route}, revision ${data.state.revision}.` : data.reason ?? 'No renderer view has been reported.'),
+      ...(!data.connected ? { isError: true } : {}) }
+  }
+}
+
+const setViewOp: Operation<z.infer<typeof viewCommandSchema>> = {
+  id: 'aurora_set_view',
+  description: 'Change the running Aurora view when the user asks to show or open something. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. Use list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation, playback or mastering is performed.',
+  input: viewCommandSchema,
+  outputSchema: outputSchema(viewAckSchema),
+  annotations: { title: 'Change desktop view', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async run(input, context) {
+    const data = await (context?.desktop?.() ?? new AuroraDesktopClient()).setView(input)
+    return { ...ok(data, `${data.status}: ${data.reasons.join('; ') || `view revision ${data.revision}`}`),
+      ...(data.status !== 'applied' ? { isError: true } : {}) }
+  }
 }
 
 /** One error contract for CLI and MCP; provider details are preserved when available. */
@@ -2271,6 +2299,8 @@ const getPromptingGuideOp: Operation<{ topic?: string }> = {
 // ── Registry ────────────────────────────────────────────────────
 
 const operationDefinitions = [
+  getViewOp,
+  setViewOp,
   getCredits,
   getWorkspaceState,
   createProjectOp,
@@ -2335,7 +2365,7 @@ export const ALL_OPERATIONS: ReadonlyArray<Operation<unknown>> = operationDefini
         result = await op.run(args, { ...context, onProgress: report })
       } finally { if (heartbeat) clearInterval(heartbeat) }
       const data = result.structuredContent
-      if (['failed', 'error', 'partial'].includes(String(data.status))) {
+      if (typeof data.jobId === 'string' && ['failed', 'error', 'partial'].includes(String(data.status))) {
         const detail = (data.lastError as JobError | undefined) ?? {
           code: 'JOB_PARTIAL', message: 'Some planned outputs could not be delivered.', retryable: false,
           nextAction: 'Inspect callResults, saved outputs and limitations before authorizing replacement paid work.'

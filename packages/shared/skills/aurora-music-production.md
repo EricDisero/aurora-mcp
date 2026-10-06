@@ -12,6 +12,14 @@ Aurora is the desktop layer between AI music generation and a real DAW: generate
 1. `aurora_get_workspace_state` — projects list, key status, folder locations. Once per session.
 2. `aurora_get_credits` — Suno credits + MVSEP minutes. ALWAYS before paid calls (see aurora-cost-discipline).
 
+## Live desktop view
+
+`aurora_get_view` reads the running window: route, working asset, Library checkbox selection, active panel, project and track folder. A stopped app returns **desktop app not connected**, with no fabricated view. View tools never generate, split, play or master audio.
+
+When the user asks to show something, call `aurora_set_view` with a unique `requestId`, the read's `expectedRevision`, and a `patch`. Pages: `create`/`library` (home), `extract`, `finish`/`split`, `settings` (modal). `openAssetId` opens a working asset in the current project; from home it takes you to Split, otherwise it keeps the page. `libraryTrackId` focuses Library on a folder (`null` = All, `unfiled` = unfiled). `selectedAssetIds` replaces Library checkbox selection in the open project (including filtered rows). Use asset and track listings for ids. Send separate requests when opening an asset leaves Library: its checkboxes require Library to be visible.
+
+Only `applied` confirms the whole patch. `partial` names failed fields; `rejected` includes stale revisions and invalid ids. `uncertain` means no confirmed outcome. Read the view before doing more; reuse the **same requestId** to retrieve the first result, never a new id to blindly repeat an unconfirmed command. Results, including timeouts, are cached for the app process. Stem-lane controls and mastering actions are not exposed yet.
+
 ## The verbs
 
 - **Generate** (`aurora_generate`) — full track from a prompt. 2 variations land as assets. 1-3 min.

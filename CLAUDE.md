@@ -1,6 +1,6 @@
 # aurora-mcp — Claude code notes
 
-MCP server + CLI + skills for Aurora at `C:\Coding Projects\aurora\aurora`. This package operates on the app's userData DB/project folders and calls providers directly. App and agent share disk + SQLite (WAL), not a server.
+MCP server + CLI + skills for Aurora at `C:\Coding Projects\aurora\aurora`. Storage and provider operations share disk + SQLite (WAL); live view tools use the app's authenticated loopback bridge.
 
 ## Layout
 
@@ -55,6 +55,7 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 
 | Op | Source / adapter contract |
 |---|---|
+| aurora_get_view / set_view | App `src/main/agent/{server,auth,view,protocol}.ts` + renderer `agent/{actions,view,selection}.ts`; `clients/desktop.ts` discovers `~/.aurora/agent-connection.json`, checks protocol/capabilities and sends requestId + optional expectedRevision. Renderer acknowledgements: applied, partial, rejected, uncertain. Timeout never confirms application. Duplicate ids return the first result per app process; reads return null when disconnected. Verify mode publishes inside its profile, exposed by `agentConnectionPath` probe. |
 | aurora_get_credits | `tools/bridge/lib/kie.ts getRemainingCredits` + MVSEP `/api/app/user` (live-docs verified 2026-06-10) |
 | aurora_get_workspace_state / list_projects / create_project / rename_project / delete_project | `src/main/storage/projects.ts` |
 | aurora_list_assets / import_file / add_reference / delete_asset | `src/main/storage/assets.ts` (+`references.ts`) |
@@ -79,7 +80,7 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 
 Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
 
-**Scope:** Stack was removed from both projects. Mix/mastering/Export remain interactive app flows; an agent bridge to them is out of scope for now. Historical Stack reference: second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
+**Scope:** Stack was removed from both projects. Generic navigation, working-asset selection and Library folder/checkbox selection use the live bridge. Stem-lane controls and Mix/mastering/Export actions remain follow-ups. Historical Stack reference: second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
 
 ## Build / test
 
@@ -90,6 +91,7 @@ npm run typecheck        # mirror --check → build shared → check MCP/CLI
 npm run smoke            # isolated stdio protocol checks, free
 npm run test:contract    # isolated MCP audio contracts, free
 npm run test:surface     # offline operation surface checks, free
+npm run test:agent-bridge # fake loopback desktop + actual command queue, no Electron
 npm run test:stem-sets   # isolated storage/read/import fixtures, free
 node packages/cli/dist/index.js status
 ```

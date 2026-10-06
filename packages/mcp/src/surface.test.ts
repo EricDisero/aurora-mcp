@@ -39,7 +39,9 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 41)
+  assert.equal(tools.length, 43)
+  assert.ok(tools.some((tool) => tool.name === 'aurora_get_view'))
+  assert.ok(tools.some((tool) => tool.name === 'aurora_set_view'))
   for (const tool of tools) {
     assert.ok(tool.description && tool.description.length <= 2048, tool.name)
     assert.equal(typeof tool.annotations?.title, 'string')
@@ -160,6 +162,7 @@ try {
     assert.ok((await client.readResource({ uri })).contents.length)
   }
   assert.equal(networkAttempts, 0, 'No provider or network requests may be attempted')
+  assert.deepEqual((await client.listTools()).tools, tools, 'Tool list stays fixed for the connection')
   console.log(`Offline surface checks passed: ${tools.length} tools, ${(routes.structuredContent?.routes as unknown[]).length} routes, 5 guides; no provider calls.`)
 } finally {
   await client.close()
