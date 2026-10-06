@@ -24,7 +24,7 @@ export async function importSplitJob(params: ImportSplitJobRequest): Promise<Imp
   let manifest: {
     command?: string
     status?: string
-    args?: { input?: string }
+    args?: { input?: string; mode?: string }
     outputs?: JobOutput[]
   }
   try {
@@ -53,7 +53,10 @@ export async function importSplitJob(params: ImportSplitJobRequest): Promise<Imp
   const outputs = new Map<string, JobOutput>()
   const skipped: ImportSplitJobResult['skipped'] = []
   const hasEe = manifest.outputs.some((output) => output.label === 'ee')
-  const canonical: StemType[] = ['vocals', 'bass', 'kick', 'snare', 'hats', 'toms', 'other']
+  // A drums-mode bridge split (one DrumSep job) has four leaves; Other holds the toms and everything else.
+  const canonical: StemType[] = manifest.args?.mode === 'drums'
+    ? ['kick', 'snare', 'hats', 'other']
+    : ['vocals', 'bass', 'kick', 'snare', 'hats', 'toms', 'other']
   for (const output of manifest.outputs) {
     let reason: string | undefined
     if (output.label === 'other' && hasEe) {
