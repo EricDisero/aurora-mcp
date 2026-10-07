@@ -462,6 +462,12 @@ export interface ComposerFields {
   soundKey: string
   soundTempo: string
   soundLoop: boolean
+  /** Seconds as typed; '' is the model's own length. */
+  duration: string
+  /** Suno's Variety 0..4; null sends nothing (the provider's default). */
+  variety: number | null
+  /** Sounds: capture lyric subtitles. */
+  grabLyrics: boolean
 }
 
 export interface ReusePlan {
@@ -476,7 +482,7 @@ export interface ReusePlan {
 /** Recipe settings Create restores; any other recorded setting is named in a note. */
 const COMPOSER_SETTINGS = new Set([
   'negativeTags', 'styleWeight', 'weirdnessConstraint', 'audioWeight', 'vocalGender',
-  'soundKey', 'soundTempo', 'soundLoop', 'key', 'tempo', 'loop'
+  'soundKey', 'soundTempo', 'soundLoop', 'key', 'tempo', 'loop', 'duration', 'variety', 'grabLyrics'
 ])
 
 /** Operations the MCP stored as `op` before recipes existed. */
@@ -522,7 +528,11 @@ export function reusePlan(r: Recipe, opts: { withReference: boolean; knownModels
     instrumental: r.instrumental ?? false,
     customMode: r.customMode ?? true,
     vocalGender: (s.vocalGender as ComposerFields['vocalGender']) ?? null,
-    negativeTags: typeof s.negativeTags === 'string' ? s.negativeTags : ''
+    negativeTags: typeof s.negativeTags === 'string' ? s.negativeTags : '',
+    // Always set, so a load never inherits the last recipe's length or variety.
+    duration: num(s.duration) !== undefined ? String(s.duration) : '',
+    variety: num(s.variety) ?? null,
+    grabLyrics: s.grabLyrics === true
   }
   const sw = num(s.styleWeight)
   const wc = num(s.weirdnessConstraint)

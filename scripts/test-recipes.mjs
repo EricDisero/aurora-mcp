@@ -330,9 +330,12 @@ try {
   assert.ok(!vocalsPlan.notes.some((n) => n.includes('no longer offers')))
   const song = deriveAssetRecipe({ kind: 'generation', origin: { provider: 'sunoapi', prompt: '', style: 'x', model: 'V6', duration: 42, variety: 0 }, createdAt: 1 })
   const songPlan = reusePlan(song, { withReference: false, knownModels: ['V6'], fallbackModel: 'V6' })
-  assert.ok(songPlan.notes.some((n) => n.includes('duration') && n.includes('variety')))
+  // Create has a control for length and variety: they load, and no note calls them lost.
+  assert.equal(songPlan.fields.duration, '42')
+  assert.equal(songPlan.fields.variety, 0)
+  assert.ok(!songPlan.notes.some((n) => n.includes('no control')))
   assert.equal(songPlan.call.args.duration, 42)
-  console.log('PASS legacy op origins, dotted model match and named unrestorable settings')
+  console.log('PASS legacy op origins, dotted model match, length and variety restored')
   assert.equal(networkAttempts, 0)
   console.log('Recipe tests passed; no provider/network calls or real user data')
 } finally {
