@@ -229,7 +229,7 @@ function outputSchema(success: z.ZodType): z.ZodType {
 
 const getViewOp: Operation<Record<string, never>> = {
   id: 'aurora_get_view',
-  description: 'Read what the running Aurora desktop window reports: route, open working asset, Library checkbox selection, active panel, project, track folder, revision and observation time. No provider calls. A stopped app returns desktop app not connected and state:null; a window that has not reported also returns state:null. Read before changing the view and use its revision as expectedRevision.',
+  description: 'Read what the running Aurora desktop window reports: route, open working asset, Library checkbox selection, active panel, project, track folder, composerDraft (current Create fields, including soundPrompt), playback (playingId, playingName, isPlaying, isLoading, positionSeconds, durationSeconds and error), revision and observation time. No provider calls. A stopped app returns desktop app not connected and state:null; a window that has not reported also returns state:null. Read before changing the view and use its revision as expectedRevision.',
   input: z.object({}).strict(),
   outputSchema: outputSchema(viewReadSchema),
   annotations: { title: 'Read desktop view', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -242,7 +242,7 @@ const getViewOp: Operation<Record<string, never>> = {
 
 const composerFieldsSchema = z.object({
   tab: z.enum(['song', 'remix', 'sounds']),
-  remixVerb: z.enum(['cover', 'addVocals', 'addInstrumental']),
+  remixVerb: z.enum(['cover', 'addVocals', 'addInstrumental', 'extend', 'replaceSection']),
   customMode: z.boolean(), prompt: z.string().max(6000), style: z.string().max(6000), title: z.string().max(6000),
   model: z.string().refine((model) => SUNO_MODELS.some((value) => value === normalizeModel(model)), 'Unknown Suno model'),
   instrumental: z.boolean(), vocalGender: z.enum(['male', 'female']).nullable(), negativeTags: z.string().max(6000),
@@ -251,7 +251,9 @@ const composerFieldsSchema = z.object({
   soundKey: z.string().max(6000), soundTempo: z.string().max(6000), soundLoop: z.boolean(),
   duration: z.string().refine((value) => value === '' || (/^[0-9]+$/.test(value) && Number(value) >= 10 && Number(value) <= 360),
     'Duration must be empty or whole seconds from 10 to 360'),
-  variety: z.number().int().min(0).max(4).nullable(), grabLyrics: z.boolean()
+  variety: z.number().int().min(0).max(4).nullable(), grabLyrics: z.boolean(),
+  continueAt: z.string().regex(/^([0-9]+(\.[0-9]+)?)?$/, 'Seconds'), sectionStart: z.string().regex(/^([0-9]+(\.[0-9]+)?)?$/, 'Seconds'),
+  sectionEnd: z.string().regex(/^([0-9]+(\.[0-9]+)?)?$/, 'Seconds'), fullLyrics: z.string().max(6000)
 }).partial().strict()
 const composerCommandSchema = viewCommandSchema.superRefine((command, ctx) => {
   if (!command.patch.composer) return
@@ -263,7 +265,7 @@ const composerCommandSchema = viewCommandSchema.superRefine((command, ctx) => {
 
 const setViewOp: Operation<z.infer<typeof viewCommandSchema>> = {
   id: 'aurora_set_view',
-  description: 'Change the running Aurora view when the user asks to show or open something. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. composer loads fromAssetId, mode, fields and notes on a desktop advertising composer-load; use reuse_prompt/reuse_reference to derive them. Use list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation, playback or mastering is performed.',
+  description: 'Change the running Aurora view when the user asks to show or open something. patch.projectId switches the open project through the desktop project selector before dependent actions; a failed switch skips them. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. composer loads fromAssetId, mode, fields and notes on a desktop advertising composer-load; use reuse_prompt/reuse_reference to derive them. playback accepts play with assetId, pause, or seek with nonnegative seconds; uses the shared preview player. Use list_projects/list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons and the settled draft/player state. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation or mastering is performed.',
   input: composerCommandSchema,
   outputSchema: outputSchema(viewAckSchema),
   annotations: { title: 'Change desktop view', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -485,6 +487,35 @@ function resolveAudioInput(input: { assetId?: string; path?: string }): {
   }
   throw new Error('Provide either assetId or path.')
 }
+
+const previewCommandShape = {
+  requestId: viewCommandSchema.shape.requestId,
+  expectedRevision: viewCommandSchema.shape.expectedRevision
+}
+function previewOperation<I>(id: string, title: string, description: string, input: z.ZodType<I>,
+  command: (input: I) => z.infer<typeof viewCommandSchema>): Operation<I> {
+  return {
+    id, description, input, outputSchema: outputSchema(viewAckSchema),
+    annotations: { title, readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async run(input, context) {
+      const data = await (context?.desktop?.() ?? new AuroraDesktopClient()).setView(command(input))
+      return { ...ok(data, `${data.status}: ${data.reasons.join('; ') || `view revision ${data.revision}`}`),
+        ...(data.status !== 'applied' ? { isError: true } : {}) }
+    }
+  }
+}
+const playInput = z.object({ ...previewCommandShape, assetId: z.string().trim().min(1).max(256) }).strict()
+const playOp = previewOperation('aurora_play', 'Play Library asset',
+  'Audition assetId in the running desktop shared preview player. The asset must belong to the open project; use aurora_set_view with projectId first. Playing the current asset resumes or keeps it playing. Required requestId deduplicates retries; optional expectedRevision guards the current view. Returns an acknowledgement with settled playback state; only applied confirms playback started. No provider calls or credit spend. For uncertain outcomes read aurora_get_view or retry the SAME requestId.',
+  playInput, ({ requestId, expectedRevision, assetId }) => ({ requestId, expectedRevision, patch: { playback: { action: 'play', assetId } } }))
+const pauseInput = z.object(previewCommandShape).strict()
+const pauseOp = previewOperation('aurora_pause', 'Pause Library preview',
+  'Pause the running desktop shared preview without clearing its loaded asset or position. Required requestId deduplicates retries; optional expectedRevision guards the current view. Returns an acknowledgement and playback state. No provider calls. For uncertain outcomes read aurora_get_view or retry the SAME requestId.',
+  pauseInput, ({ requestId, expectedRevision }) => ({ requestId, expectedRevision, patch: { playback: { action: 'pause' } } }))
+const seekInput = z.object({ ...previewCommandShape, seconds: z.number().finite().nonnegative() }).strict()
+const seekOp = previewOperation('aurora_seek', 'Seek Library preview',
+  'Seek the loaded desktop shared preview to absolute nonnegative seconds, clamped to its known duration. Play an asset first. Required requestId deduplicates retries; optional expectedRevision guards the current view. Returns an acknowledgement and actual positionSeconds. No provider calls. For uncertain outcomes read aurora_get_view or retry the SAME requestId.',
+  seekInput, ({ requestId, expectedRevision, seconds }) => ({ requestId, expectedRevision, patch: { playback: { action: 'seek', seconds } } }))
 
 async function writeAudioCopy<T>(sourcePath: string, fileName: string, render: (path: string) => Promise<T>): Promise<{ outputPath: string; result: T }> {
   const scratch = await mkdtemp(join(tmpdir(), 'aurora-audio-'))
@@ -2579,6 +2610,9 @@ const getPromptingGuideOp: Operation<{ topic?: string }> = {
 const operationDefinitions = [
   getViewOp,
   setViewOp,
+  playOp,
+  pauseOp,
+  seekOp,
   getCredits,
   getWorkspaceState,
   createProjectOp,

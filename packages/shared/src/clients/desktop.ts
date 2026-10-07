@@ -5,16 +5,23 @@ import { z } from 'zod'
 
 // Wire contract mirrored from aurora/src/main/agent/protocol.ts; the free bridge test checks it.
 export const DESKTOP_PROTOCOL_VERSION = 1
-export const DESKTOP_CAPABILITIES = ['view', 'view-set', 'request-ack', 'composer-load'] as const
+export const DESKTOP_CAPABILITIES = ['view', 'view-set', 'request-ack', 'composer-load', 'project-set',
+  'preview-play', 'preview-pause', 'preview-seek', 'composer-read'] as const
 export const DESKTOP_PAGES = ['create', 'library', 'extract', 'finish', 'split', 'settings'] as const
 const id = z.string().trim().min(1).max(256)
 export const viewPatchSchema = z.object({
   page: z.enum(DESKTOP_PAGES).optional(),
+  projectId: id.optional(),
   openAssetId: id.nullable().optional(),
   selectedAssetIds: z.array(id).max(500).optional(),
   libraryTrackId: id.nullable().optional(),
   composer: z.object({ fromAssetId: id, mode: z.enum(['prompt', 'reference', 'variations']),
-    fields: z.record(z.unknown()), notes: z.array(z.string()) }).strict().optional()
+    fields: z.record(z.unknown()), notes: z.array(z.string()) }).strict().optional(),
+  playback: z.discriminatedUnion('action', [
+    z.object({ action: z.literal('play'), assetId: id }).strict(),
+    z.object({ action: z.literal('pause') }).strict(),
+    z.object({ action: z.literal('seek'), seconds: z.number().finite().nonnegative() }).strict()
+  ]).optional()
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'Name at least one view field')
 export const viewCommandSchema = z.object({
   requestId: z.string().trim().min(1).max(128),
@@ -24,6 +31,11 @@ export const viewCommandSchema = z.object({
 export const viewStateSchema = z.object({
   route: z.string().startsWith('/'), projectId: id.nullable(), openAssetId: id.nullable(),
   selectedAssetIds: z.array(id).max(500), activePanel: z.string(), libraryTrackId: id.nullable(),
+  playback: z.object({ playingId: id.nullable(), playingName: z.string().nullable(),
+    isPlaying: z.boolean(), isLoading: z.boolean(), positionSeconds: z.number().finite().nonnegative(),
+    durationSeconds: z.number().finite().nonnegative(), error: z.string().nullable() }).optional(),
+  // Optional: an app older than the transport tools reports neither.
+  composerDraft: z.record(z.union([z.string(), z.number().finite(), z.boolean(), z.null()])).optional(),
   revision: z.number().int().nonnegative(), observedAt: z.string().datetime()
 })
 export const viewReadSchema = z.object({ connected: z.boolean(), state: viewStateSchema.nullable(), reason: z.string().optional() })
@@ -83,11 +95,11 @@ export class AuroraDesktopClient {
     } finally { clearTimeout(timer) }
   }
 
-  private async connect(capability: string): Promise<z.infer<typeof connectionSchema>> {
+  private async connect(capabilities: string[]): Promise<z.infer<typeof connectionSchema>> {
     const connection = this.discover()
-    compatible(connection, capability)
+    for (const capability of capabilities) compatible(connection, capability)
     const health = healthSchema.parse(await this.request(connection, '/agent/healthz'))
-    compatible(health, capability)
+    for (const capability of capabilities) compatible(health, capability)
     compatible(health, 'request-ack')
     if (health.pid !== connection.pid || health.appVersion !== connection.appVersion) throw new DesktopError('DESKTOP_CONNECTION_STALE', 'Desktop identity differs from the connection file; rediscover after restarting Aurora')
     return connection
@@ -95,7 +107,7 @@ export class AuroraDesktopClient {
 
   async getView(): Promise<z.infer<typeof viewReadSchema>> {
     try {
-      const connection = await this.connect('view')
+      const connection = await this.connect(['view', 'composer-read'])
       return viewReadSchema.parse(await this.request(connection, '/agent/view'))
     } catch (error) {
       if (error instanceof DesktopError && error.code === 'DESKTOP_NOT_CONNECTED') return { connected: false, state: null, reason: error.message }
@@ -106,7 +118,10 @@ export class AuroraDesktopClient {
   async setView(input: ViewCommand): Promise<ViewAck> {
     const command = viewCommandSchema.parse(input)
     let connection: z.infer<typeof connectionSchema>
-    try { connection = await this.connect(command.patch.composer ? 'composer-load' : 'view-set') }
+    const capabilities = ['view-set', ...(command.patch.composer ? ['composer-load'] : []),
+      ...(command.patch.projectId !== undefined ? ['project-set'] : []),
+      ...(command.patch.playback ? [`preview-${command.patch.playback.action}`] : [])]
+    try { connection = await this.connect(capabilities) }
     catch (error) {
       if (error instanceof DesktopError && error.code === 'DESKTOP_NOT_CONNECTED') return {
         connected: false, requestId: command.requestId, status: 'rejected', state: null, revision: null, reasons: [error.message]

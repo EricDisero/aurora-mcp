@@ -39,7 +39,7 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 51)
+  assert.equal(tools.length, 54)
   for (const name of ['aurora_get_recipe', 'aurora_copy_recipe', 'aurora_reuse_prompt', 'aurora_reuse_reference', 'aurora_make_variations']) {
     assert.ok(tools.some((tool) => tool.name === name), `${name} listed on first request`)
   }
