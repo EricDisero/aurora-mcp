@@ -14,7 +14,9 @@ import {
   downloadTo,
   fetchGenerationRecord,
   generationFailureDetail,
-  isGenerationFailure
+  isGenerationFailure,
+  returnedGenerationMeta,
+  type PolledVariation
 } from './providers/suno.js'
 import { fetchSeparationStatus, resolveSeparationStatus, mvsepProvider, MvsepError, separationError } from './providers/mvsep.js'
 import { ensureKindDir, getAsset, insertAsset, uniqueDestPath } from './storage/assets.js'
@@ -207,7 +209,7 @@ function sanitizeFileName(name: string): string {
  *  the app's or MCP's fetch-WAV upgrades on demand). */
 async function landGenerationAssets(
   m: JobManifest,
-  variations: Array<{ id?: string; audioUrl?: string }>,
+  variations: PolledVariation[],
   signal?: AbortSignal
 ): Promise<void> {
   // Source-derived transforms land as 'cover' kind (linked to the source);
@@ -222,12 +224,6 @@ async function landGenerationAssets(
     mashup: 'mashup', split: 'split', extract: 'extract'
   }
   const operation = operations[m.kind]
-  const recipe = generationRecipe({ operation, params: m.params, recordedBy: 'mcp',
-    sourceAssetId: m.provider.sourceAssetId ?? null,
-    sourcePath: typeof m.params.sourcePath === 'string' ? m.params.sourcePath : null,
-    sourceAssetIdB: typeof m.params.sourceAssetIdB === 'string' ? m.params.sourceAssetIdB : null,
-    sourcePathB: typeof m.params.sourcePathB === 'string' ? m.params.sourcePathB : null })
-
   for (let i = 0; i < variations.length; i++) {
     if (await stopped(m, signal)) return
     if (m.landed[`variation-${i}`]) continue
@@ -237,6 +233,14 @@ async function landGenerationAssets(
     const ext = extname(new URL(v.audioUrl).pathname) || '.mp3'
     const dest = uniqueDestPath(outputDir, `${sanitizeFileName(variantName)}${ext}`)
     await downloadTo(v.audioUrl, dest)
+    const origin = {
+      provider: 'sunoapi',
+      ...m.params,
+      operation,
+      taskId: m.provider.taskId,
+      audioId: v.id ?? null,
+      returned: returnedGenerationMeta(v)
+    }
 
     const asset = insertAsset({
       projectId: m.projectId,
@@ -244,15 +248,13 @@ async function landGenerationAssets(
       kind,
       name: sanitizeFileName(variantName),
       path: dest,
-      origin: {
-        provider: 'sunoapi',
-        ...m.params,
-        operation,
-        taskId: m.provider.taskId,
-        audioId: v.id ?? null
-      },
+      origin,
       sourceAssetId: m.provider.sourceAssetId ?? null,
-      recipe
+      recipe: generationRecipe({ operation, params: origin, recordedBy: 'mcp',
+        sourceAssetId: m.provider.sourceAssetId ?? null,
+        sourcePath: typeof m.params.sourcePath === 'string' ? m.params.sourcePath : null,
+        sourceAssetIdB: typeof m.params.sourceAssetIdB === 'string' ? m.params.sourceAssetIdB : null,
+        sourcePathB: typeof m.params.sourcePathB === 'string' ? m.params.sourcePathB : null })
     })
     m.assetIds.push(asset.id)
     m.landed[`variation-${i}`] = true

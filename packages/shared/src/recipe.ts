@@ -86,6 +86,16 @@ export interface Recipe {
   recordedBy: 'app' | 'mcp' | 'backfill'
   /** Backfilled recipes only: what the stored data could not recover. */
   missing?: string[]
+  /** What Suno sent back for this take (the lyrics it sang, its title and
+   *  tags), kept apart from what was asked for. */
+  returned?: RecipeReturned | null
+}
+
+export interface RecipeReturned {
+  lyrics: string | null
+  title: string | null
+  tags: string | null
+  durationSeconds: number | null
 }
 
 // ── Measured prices ─────────────────────────────────────────────────────────
@@ -144,7 +154,8 @@ const NOT_SETTINGS = new Set<string>([
   'wait',
   'background',
   'confirm',
-  'estimateOnly'
+  'estimateOnly',
+  'returned'
 ])
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -230,8 +241,20 @@ export function generationRecipe(a: GenerationRecipeArgs): Recipe {
     lineage,
     credits: creditsFor(a.operation, provider),
     createdAt: a.createdAt ?? Date.now(),
-    recordedBy: a.recordedBy
+    recordedBy: a.recordedBy,
+    returned: returnedOf(p.returned)
   }
+}
+
+function returnedOf(v: unknown): RecipeReturned | null {
+  if (!isRecord(v)) return null
+  const r = {
+    lyrics: str(v.lyrics),
+    title: str(v.title),
+    tags: str(v.tags),
+    durationSeconds: typeof v.durationSeconds === 'number' ? v.durationSeconds : null
+  }
+  return r.lyrics || r.title || r.tags ? r : null
 }
 
 export interface LocalRecipeArgs {
@@ -445,7 +468,7 @@ export function recipeRefusal(r: Recipe | null): string | null {
 /** The composer's fields, by the names GeneratePanel holds them. */
 export interface ComposerFields {
   tab: 'song' | 'remix' | 'sounds'
-  remixVerb: 'cover' | 'addVocals' | 'addInstrumental'
+  remixVerb: 'cover' | 'addVocals' | 'addInstrumental' | 'extend' | 'replaceSection'
   customMode: boolean
   prompt: string
   style: string
@@ -468,6 +491,13 @@ export interface ComposerFields {
   variety: number | null
   /** Sounds: capture lyric subtitles. */
   grabLyrics: boolean
+  /** Extend: seconds into the source to continue from; '' continues with the source's own settings. */
+  continueAt: string
+  /** Replace section: the window to rewrite, in seconds as typed. */
+  sectionStart: string
+  sectionEnd: string
+  /** Replace section: the whole song's lyrics with the new section in place. */
+  fullLyrics: string
 }
 
 export interface ReusePlan {
@@ -482,7 +512,8 @@ export interface ReusePlan {
 /** Recipe settings Create restores; any other recorded setting is named in a note. */
 const COMPOSER_SETTINGS = new Set([
   'negativeTags', 'styleWeight', 'weirdnessConstraint', 'audioWeight', 'vocalGender',
-  'soundKey', 'soundTempo', 'soundLoop', 'key', 'tempo', 'loop', 'duration', 'variety', 'grabLyrics'
+  'soundKey', 'soundTempo', 'soundLoop', 'key', 'tempo', 'loop', 'duration', 'variety', 'grabLyrics',
+  'continueAt', 'infillStartS', 'infillEndS', 'fullLyrics'
 ])
 
 /** Operations the MCP stored as `op` before recipes existed. */
@@ -509,14 +540,17 @@ const MCP_OP: Partial<Record<RecipeOperation, string>> = {
  * `knownModels` is the composer's model list: a model no longer offered falls
  * back to `fallbackModel`, said in a note.
  */
-export function reusePlan(r: Recipe, opts: { withReference: boolean; knownModels: readonly string[]; fallbackModel: string }): ReusePlan {
+export function reusePlan(
+  r: Recipe,
+  opts: { withReference: boolean; knownModels: readonly string[]; fallbackModel: string; /** false: no note names a model (the app). */ nameModels?: boolean }
+): ReusePlan {
   const s = r.settings
   const notes: string[] = []
   // Wire ids use underscores (V5_5) where the composer lists dots (V5.5): match either.
   const wire = (m: string): string => m.replace(/\./g, '_').toUpperCase()
   const known = r.model ? opts.knownModels.find((m) => wire(m) === wire(r.model!)) : undefined
   const model = known ?? opts.fallbackModel
-  if (!known) notes.push(`Made on ${r.model ?? 'an unrecorded model'}, which the composer no longer offers: set up for ${opts.fallbackModel}.`)
+  if (!known && opts.nameModels !== false) notes.push(`Made on ${r.model ?? 'an unrecorded model'}, which the composer no longer offers: set up for ${opts.fallbackModel}.`)
   const sourceId = r.inputs.find((i) => i.role === 'source')?.assetId ?? ''
   const sourcePath = r.inputs.find((i) => i.role === 'upload')?.path ?? ''
   const hasSource = !!(sourceId || sourcePath)
@@ -559,6 +593,22 @@ export function reusePlan(r: Recipe, opts: { withReference: boolean; knownModels
     } else {
       fields.tab = 'song'
       if (opts.withReference) notes.push('The source audio was not recorded: set up as a song from the same words.')
+    }
+  } else if ((r.operation === 'extend' || r.operation === 'replace-section') && opts.withReference && hasSource) {
+    // Only these loads carry the section fields, so an app without them refuses
+    // nothing it could otherwise show.
+    fields.tab = 'remix'
+    fields.sourceAssetId = sourceId ?? ''
+    fields.sourcePath = sourceId ? '' : sourcePath ?? ''
+    const at = (v: unknown): string => (num(v) !== undefined ? String(v) : '')
+    if (r.operation === 'extend') {
+      fields.remixVerb = 'extend'
+      fields.continueAt = at(s.continueAt)
+    } else {
+      fields.remixVerb = 'replaceSection'
+      fields.sectionStart = at(s.infillStartS)
+      fields.sectionEnd = at(s.infillEndS)
+      fields.fullLyrics = typeof s.fullLyrics === 'string' ? s.fullLyrics : ''
     }
   } else {
     fields.tab = 'song'
@@ -648,8 +698,8 @@ export function relationLabel(rel: RecipeLineage['relation']): string {
 export function creditsLabel(c: RecipeCredits | null | undefined): string {
   if (!c) return 'Not recorded'
   if (c.basis === 'none') return 'Free (local)'
-  if (c.amount === null) return c.unit === 'mvsep-minutes' ? 'MVSEP premium minutes, amount not recorded' : 'Suno credits, amount not measured'
-  const unit = c.unit === 'mvsep-minutes' ? 'premium minutes' : 'Suno credits'
+  if (c.amount === null) return c.unit === 'mvsep-minutes' ? 'Separation minutes, amount not recorded' : 'Credits, amount not measured'
+  const unit = c.unit === 'mvsep-minutes' ? 'separation minutes' : 'credits'
   return `${c.amount} ${unit}${c.basis === 'estimate' ? ' (estimate)' : ''}`
 }
 
@@ -661,7 +711,8 @@ function settingValue(v: unknown): string {
 
 /** The whole recipe as readable text: what Copy recipe puts on the clipboard. */
 export function recipeText(r: Recipe, nameOf: (assetId: string) => string | null = () => null): string {
-  const lines: string[] = [`${operationLabel(r.operation)}${r.model ? ` · ${r.model}` : ''}${r.provider && r.provider !== 'local' ? ` · ${r.provider}` : ''}`]
+  // No provider or model names: the recipe reads as Aurora's own.
+  const lines: string[] = [operationLabel(r.operation)]
   if (r.title) lines.push(`Title: ${r.title}`)
   if (r.style) lines.push(`Style: ${r.style}`)
   if (r.prompt) lines.push(`${r.customMode === false ? 'Description' : 'Lyrics'}:\n${r.prompt}`)

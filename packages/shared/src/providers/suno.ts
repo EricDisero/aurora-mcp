@@ -696,7 +696,23 @@ export interface PolledVariation {
    *  never persist; use for instant preview only. */
   streamAudioUrl?: string
   title?: string
+  prompt?: string
+  tags?: string
   duration?: number
+}
+
+export function returnedGenerationMeta(variation: PolledVariation): {
+  lyrics: string | null
+  title: string | null
+  tags: string | null
+  durationSeconds: number | null
+} {
+  return {
+    lyrics: variation.prompt ?? null,
+    title: variation.title ?? null,
+    tags: variation.tags ?? null,
+    durationSeconds: variation.duration ?? null
+  }
 }
 
 export interface GenerationRecord {
@@ -738,6 +754,8 @@ export async function fetchGenerationRecord(taskId: string): Promise<GenerationR
           audioUrl?: string
           streamAudioUrl?: string
           title?: string
+          prompt?: string
+          tags?: string
           duration?: number
         }>
       }
@@ -749,6 +767,8 @@ export async function fetchGenerationRecord(taskId: string): Promise<GenerationR
     audioUrl: s.audioUrl,
     streamAudioUrl: s.streamAudioUrl,
     title: s.title,
+    prompt: s.prompt,
+    tags: s.tags,
     duration: s.duration
   }))
   return {

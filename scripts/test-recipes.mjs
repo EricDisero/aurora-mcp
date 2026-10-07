@@ -336,6 +336,31 @@ try {
   assert.ok(!songPlan.notes.some((n) => n.includes('no control')))
   assert.equal(songPlan.call.args.duration, 42)
   console.log('PASS legacy op origins, dotted model match, length and variety restored')
+
+  // Wave 2: what Suno sang is kept apart from what was asked; extend and section edits reuse into Create.
+  const sung = generationRecipe({ operation: 'generate', recordedBy: 'mcp', params: { prompt: 'a calm song', customMode: false,
+    model: 'V6', returned: { lyrics: '[Verse]\nsung words', title: 'Calm', tags: 'ambient', durationSeconds: 120 } } })
+  assert.equal(sung.prompt, 'a calm song')
+  assert.equal(sung.returned.lyrics, '[Verse]\nsung words')
+  assert.ok(!('returned' in sung.settings))
+  const section = generationRecipe({ operation: 'replace-section', recordedBy: 'mcp', sourceAssetId: 'src-1',
+    params: { prompt: 'new lines', tags: 'choir', title: 'T', fullLyrics: 'all the words', infillStartS: 30, infillEndS: 45, model: 'V5' } })
+  const sectionPlan = reusePlan(section, { withReference: true, knownModels: ['V5', 'V6'], fallbackModel: 'V6' })
+  assert.equal(sectionPlan.fields.remixVerb, 'replaceSection')
+  assert.equal(sectionPlan.fields.sourceAssetId, 'src-1')
+  assert.equal(sectionPlan.fields.sectionStart, '30')
+  assert.equal(sectionPlan.fields.sectionEnd, '45')
+  assert.equal(sectionPlan.fields.fullLyrics, 'all the words')
+  assert.ok(!sectionPlan.notes.some((n) => n.includes('no control')))
+  const ext = generationRecipe({ operation: 'extend', recordedBy: 'mcp', sourceAssetId: 'src-1', params: { continueAt: 60, style: 's', title: 't', model: 'V6' } })
+  const extPlan = reusePlan(ext, { withReference: true, knownModels: ['V6'], fallbackModel: 'V6' })
+  assert.equal(extPlan.fields.remixVerb, 'extend')
+  assert.equal(extPlan.fields.continueAt, '60')
+  // Without the reference an extend comes back as a song, and no section field rides along.
+  const extSong = reusePlan(ext, { withReference: false, knownModels: ['V6'], fallbackModel: 'V6' })
+  assert.equal(extSong.fields.tab, 'song')
+  assert.equal(extSong.fields.continueAt, undefined)
+  console.log('PASS returned lyrics kept apart, extend and section edits reuse into Create')
   assert.equal(networkAttempts, 0)
   console.log('Recipe tests passed; no provider/network calls or real user data')
 } finally {
