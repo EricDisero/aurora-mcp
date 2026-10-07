@@ -107,7 +107,9 @@ export class AuroraDesktopClient {
 
   async getView(): Promise<z.infer<typeof viewReadSchema>> {
     try {
-      const connection = await this.connect(['view', 'composer-read'])
+      // 'view' only: an app older than the transport tools lacks composer-read but still reports its view,
+      // and the schema reads playback and composerDraft only when present.
+      const connection = await this.connect(['view'])
       return viewReadSchema.parse(await this.request(connection, '/agent/view'))
     } catch (error) {
       if (error instanceof DesktopError && error.code === 'DESKTOP_NOT_CONNECTED') return { connected: false, state: null, reason: error.message }

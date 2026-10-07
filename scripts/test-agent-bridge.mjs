@@ -283,6 +283,9 @@ try {
   healthVersion = DESKTOP_PROTOCOL_VERSION
   capabilities = ['view']
   await assert.rejects(client.setView(command('unsupported')), (error) => error.code === 'DESKTOP_CAPABILITY_MISSING')
+  // An app older than the transport tools (aurora 50d8ed6's list) still reads its view.
+  capabilities = ['view', 'view-set', 'request-ack', 'composer-load']
+  assert.equal((await client.getView()).state.route, '/')
   capabilities = [...DESKTOP_CAPABILITIES]
   assert.equal((await client.getView()).state.route, '/')
 
