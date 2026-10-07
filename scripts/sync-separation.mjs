@@ -80,7 +80,9 @@ const drift = []
 for (const [dest, body] of Object.entries(outputs)) {
   const path = join(OUT, dest)
   const current = existsSync(path) ? readFileSync(path, 'utf8') : null
-  if (current === body) continue
+  // Git's autocrlf checks files out with CRLF on Windows: only content counts as drift.
+  const lf = (text) => text.replace(/\r\n/g, '\n')
+  if (current !== null && lf(current) === lf(body)) continue
   drift.push(dest)
   if (!check) {
     mkdirSync(dirname(path), { recursive: true })
