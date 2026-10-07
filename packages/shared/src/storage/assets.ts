@@ -12,6 +12,8 @@ import { deleteReference } from './references.js'
 import { deleteSetsForAsset } from './stem-sets.js'
 import { rewriteStemPaths } from './moved-paths.js'
 import type { AssetKind, ProjectAsset } from '../types.js'
+import { deriveAssetRecipe, parseRecipe, localRecipe, type Recipe } from '../recipe.js'
+import { standardizeToWav } from '../audio/ffmpeg.js'
 
 const KIND_DIRS: Record<AssetKind, string> = {
   generation: 'generations',
@@ -32,6 +34,7 @@ interface AssetRow {
   ref_id: string | null
   favorite: number
   created_at: number
+  recipe: string | null
 }
 
 function rowToAsset(row: AssetRow): ProjectAsset {
@@ -46,7 +49,10 @@ function rowToAsset(row: AssetRow): ProjectAsset {
     sourceAssetId: row.source_asset_id,
     refId: row.ref_id,
     favorite: !!row.favorite,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    recipe:
+      parseRecipe(row.recipe) ??
+      deriveAssetRecipe({ kind: row.kind, origin: row.origin, sourceAssetId: row.source_asset_id, refId: row.ref_id, createdAt: row.created_at })
   }
 }
 
@@ -122,12 +128,18 @@ export function insertAsset(params: {
   origin?: unknown
   sourceAssetId?: string | null
   refId?: string | null
+  /** What made it. Absent: derived from origin and lineage, with `missing` saying what is not known. */
+  recipe?: Recipe | null
 }): ProjectAsset {
   const id = uuidv4()
+  const createdAt = Date.now()
+  const recipe =
+    params.recipe ??
+    deriveAssetRecipe({ kind: params.kind, origin: params.origin ?? null, sourceAssetId: params.sourceAssetId ?? null, createdAt })
   getDb()
     .prepare(
-      `INSERT INTO project_assets (id, project_id, track_id, kind, name, path, origin, source_asset_id, ref_id, favorite, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      `INSERT INTO project_assets (id, project_id, track_id, kind, name, path, origin, source_asset_id, ref_id, favorite, created_at, recipe)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
     )
     .run(
       id,
@@ -139,30 +151,38 @@ export function insertAsset(params: {
       params.origin ? JSON.stringify(params.origin) : null,
       params.sourceAssetId ?? null,
       params.refId ?? null,
-      Date.now()
+      createdAt,
+      JSON.stringify(recipe)
     )
   touchProject(params.projectId)
   return getAsset(id)!
 }
 
-/** Copy an external file into the project as a neutral 'track' asset. The curve
+/** Standardize an external file into the project as a neutral 'track' asset. The curve
  *  cache (reference_tracks) is born lazily only when this track is later pointed
  *  at as a match target — not at add time. */
 export async function addFileAsset(params: {
   projectId: string
   trackId?: string | null
   filePath: string
+  /** A local transform landing through here names its own source and recipe. */
+  sourceAssetId?: string | null
+  recipe?: Recipe | null
 }): Promise<ProjectAsset> {
   const dir = await ensureKindDir(params.projectId, 'track', params.trackId)
-  const dest = uniqueDestPath(dir, basename(params.filePath))
-  await copyFile(params.filePath, dest)
+  const dest = uniqueDestPath(dir, `${basename(params.filePath, extname(params.filePath))}.wav`)
+  await standardizeToWav(params.filePath, dest)
 
   return insertAsset({
     projectId: params.projectId,
     trackId: params.trackId,
     kind: 'track',
     name: basename(dest, extname(dest)),
-    path: dest
+    path: dest,
+    sourceAssetId: params.sourceAssetId ?? null,
+    recipe: params.recipe ?? localRecipe({ operation: 'import', recordedBy: 'mcp',
+      inputs: [{ role: 'upload', path: params.filePath, name: basename(params.filePath) }],
+      settings: { standardizedTo: 'wav 44.1 kHz stereo float32' } })
   })
 }
 

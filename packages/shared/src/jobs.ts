@@ -31,6 +31,7 @@ import {
   type ExtractJobState
 } from './extract.js'
 import { STEM_TYPES, normalizeStemId, type JobError, type SeparationAttempt } from './types.js'
+import { generationRecipe, type RecipeOperation } from './recipe.js'
 
 const JOB_STATUSES = ['queued', 'submitting', 'waiting', 'landing', 'completed', 'partial', 'failed', 'cancelled'] as const
 export type JobStatus = (typeof JOB_STATUSES)[number]
@@ -215,6 +216,17 @@ async function landGenerationAssets(
   const derived = m.kind === 'cover' || m.kind === 'extend' || m.kind === 'replace_section' || m.kind === 'mashup'
   const kind = derived && m.provider.sourceAssetId ? 'cover' : 'generation'
   const outputDir = await ensureKindDir(m.projectId, kind, m.trackId)
+  const operations: Record<JobKind, RecipeOperation> = {
+    generate: 'generate', sounds: 'sounds', cover: 'cover', add_vocals: 'add-vocals',
+    add_instrumental: 'add-instrumental', extend: 'extend', replace_section: 'replace-section',
+    mashup: 'mashup', split: 'split', extract: 'extract'
+  }
+  const operation = operations[m.kind]
+  const recipe = generationRecipe({ operation, params: m.params, recordedBy: 'mcp',
+    sourceAssetId: m.provider.sourceAssetId ?? null,
+    sourcePath: typeof m.params.sourcePath === 'string' ? m.params.sourcePath : null,
+    sourceAssetIdB: typeof m.params.sourceAssetIdB === 'string' ? m.params.sourceAssetIdB : null,
+    sourcePathB: typeof m.params.sourcePathB === 'string' ? m.params.sourcePathB : null })
 
   for (let i = 0; i < variations.length; i++) {
     if (await stopped(m, signal)) return
@@ -235,10 +247,12 @@ async function landGenerationAssets(
       origin: {
         provider: 'sunoapi',
         ...m.params,
+        operation,
         taskId: m.provider.taskId,
         audioId: v.id ?? null
       },
-      sourceAssetId: m.provider.sourceAssetId ?? null
+      sourceAssetId: m.provider.sourceAssetId ?? null,
+      recipe
     })
     m.assetIds.push(asset.id)
     m.landed[`variation-${i}`] = true

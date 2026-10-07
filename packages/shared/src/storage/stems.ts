@@ -3,6 +3,7 @@
 import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '../db.js'
 import type { ProjectStem, StemType } from '../types.js'
+import { deriveStemRecipe, parseRecipe, type Recipe } from '../recipe.js'
 
 interface StemRow {
   id: string
@@ -10,7 +11,8 @@ interface StemRow {
   asset_id: string
   stem_type: StemType
   path: string
-  origin: 'mvsep' | 'synthesized'
+  origin: 'mvsep' | 'synthesized' | 'imported'
+  recipe: string | null
 }
 
 function rowToStem(row: StemRow): ProjectStem {
@@ -20,7 +22,10 @@ function rowToStem(row: StemRow): ProjectStem {
     assetId: row.asset_id,
     stemType: row.stem_type,
     path: row.path,
-    origin: row.origin
+    origin: row.origin,
+    recipe:
+      parseRecipe(row.recipe) ??
+      deriveStemRecipe({ table: 'project_stems', assetId: row.asset_id, origin: row.origin, stemKey: row.stem_type })
   }
 }
 
@@ -46,17 +51,22 @@ export function upsertStem(params: {
   assetId: string
   stemType: StemType
   path: string
-  origin: 'mvsep' | 'synthesized'
+  origin: 'mvsep' | 'synthesized' | 'imported'
+  /** What made it. Absent: derived from the row, with `missing` saying what is not known. */
+  recipe?: Recipe | null
 }): ProjectStem {
   const db = getDb()
   const id = uuidv4()
+  const recipe =
+    params.recipe ??
+    deriveStemRecipe({ table: 'project_stems', assetId: params.assetId, origin: params.origin, stemKey: params.stemType, createdAt: Date.now() })
 
   db.prepare(
-    `INSERT INTO project_stems (id, project_id, asset_id, stem_type, path, origin)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO project_stems (id, project_id, asset_id, stem_type, path, origin, recipe)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(asset_id, stem_type)
-     DO UPDATE SET path = excluded.path, origin = excluded.origin`
-  ).run(id, params.projectId, params.assetId, params.stemType, params.path, params.origin)
+     DO UPDATE SET path = excluded.path, origin = excluded.origin, recipe = excluded.recipe`
+  ).run(id, params.projectId, params.assetId, params.stemType, params.path, params.origin, JSON.stringify(recipe))
 
   const row = db
     .prepare('SELECT * FROM project_stems WHERE asset_id = ? AND stem_type = ?')

@@ -1,3 +1,5 @@
+import type { Recipe } from './recipe.js'
+
 // Aurora domain types — mirrored from aurora/src/shared/types/index.ts (the
 // locked contract). The MCP works against the SAME DB + project folders as the
 // app, so these shapes must stay in lockstep with its schema.
@@ -42,6 +44,7 @@ export interface ProjectAsset {
   /** Persisted favorite flag (schema v3). */
   favorite: boolean
   createdAt: number
+  recipe: Recipe
 }
 
 export const STEM_TYPES = ['vocals', 'kick', 'snare', 'toms', 'hats', 'bass', 'other'] as const
@@ -73,6 +76,7 @@ export interface StoredStemSet {
   sourcePath: string | null
   createdAt: number
   lanes: StoredStemLane[]
+  recipe: Recipe
 }
 
 export interface CreateStemSetParams {
@@ -82,6 +86,7 @@ export interface CreateStemSetParams {
   name: string
   sourcePath?: string
   lanes: StemLaneInput[]
+  recipe?: Recipe | null
 }
 
 export interface CreateStemSetRequest {
@@ -95,6 +100,8 @@ export interface LaneView extends StemLaneInput {
   available: boolean
   group: 'drums' | null
   sortOrder: number
+  /** What made this lane's file: its stem row's recipe, or its stored set's. */
+  recipe?: Recipe
 }
 
 export interface StemSetView {
@@ -132,7 +139,8 @@ export interface ProjectStem {
   assetId: string
   stemType: StemType
   path: string
-  origin: 'mvsep' | 'synthesized'
+  origin: 'mvsep' | 'synthesized' | 'imported'
+  recipe: Recipe
 }
 
 /** A Sample Extractor result stem (schema v2 extraction_stems). stemId is a
@@ -146,6 +154,7 @@ export interface ExtractionStem {
   /** Krumhansl-Schmuckler result, e.g. "C major / A minor" (null = not detected). */
   detectedKey: string | null
   createdAt: number
+  recipe: Recipe
 }
 
 export interface ReferenceTrack {

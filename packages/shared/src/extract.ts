@@ -13,10 +13,12 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { mvsepProvider, MvsepError, separationError } from './providers/mvsep.js'
 import { ALL_ROUTES } from './separation/routes.js'
-import { submitRoute, landRouteResult } from './separation/run-route.js'
+import { submitRoute, landRouteResult, routeSpec } from './separation/run-route.js'
+import { MVSEP_ALGORITHMS } from './separation/mvsep-catalog.generated.js'
+import { localRecipe, type Recipe } from './recipe.js'
 import { describeSeparationResult } from './separation-tools.js'
 import { getAsset, getAssetExtractsDir } from './storage/assets.js'
-import { upsertExtractionStem } from './storage/extractions.js'
+import { getExtractionStems, upsertExtractionStem } from './storage/extractions.js'
 import { probeDurationSeconds, standardizeToWav } from './audio/ffmpeg.js'
 import { decodeWavFile, encodeWavFloat32File, subtractWavs } from './audio/wav.js'
 import { detectKey } from './key-detect.js'
@@ -64,6 +66,18 @@ function callInputPath(state: ExtractJobState): string {
 function callOptions(state: ExtractJobState): { add_opt2: string } | undefined {
   const call = state.calls[state.callIndex]
   return call.addOpt2 === undefined ? undefined : { add_opt2: String(call.addOpt2) }
+}
+
+function extractionRecipe(state: ExtractJobState, call: PlannedApiCall, stem: string): Recipe {
+  const route = ALL_ROUTES[call.routeId]
+  const attempt = state.callResults?.[state.calls.indexOf(call)]
+  const spec = routeSpec(route, attempt?.spec ?? (call.addOpt2 === undefined ? undefined : { add_opt2: String(call.addOpt2) }))
+  // Older/future manifests may carry a catalog estimate; current plans have no price per call.
+  const amount = 'credits' in call && typeof call.credits === 'number' ? call.credits : null
+  return localRecipe({ operation: 'extract', recordedBy: 'mcp', provider: 'mvsep', fromAssetId: state.assetId,
+    model: MVSEP_ALGORITHMS[route.sepType]?.name ?? route.label, modelVersion: spec.add_opt1 ?? null,
+    settings: { stem, routeId: route.id, ...spec, inputSource: call.inputSource },
+    credits: { provider: 'mvsep', amount, unit: 'mvsep-minutes', basis: amount === null ? 'unknown' : 'estimate' } })
 }
 
 /** Cap + standardize + key-detect + plan. Runs ONCE at op time, before any
@@ -185,7 +199,8 @@ export async function landExtractCall(
   if (!asset) throw new Error(`Extract source asset no longer exists: ${state.assetId}`)
   for (const stemId of delivered) {
     upsertExtractionStem({ projectId: asset.projectId, assetId: asset.id, stemId,
-      path: state.extractedFiles[stemId], detectedKey: state.detectedKey })
+      path: state.extractedFiles[stemId], detectedKey: state.detectedKey,
+      recipe: extractionRecipe(state, call, stemId) })
   }
   Object.assign(attempt, { status: 'landed', deliveredStemIds: delivered,
     checks: describeSeparationResult(route.id, result, run) })
@@ -225,14 +240,23 @@ export async function finalizeExtract(
   state.extractedFiles.other = otherPath
 
   const rows: ExtractionStem[] = []
+  const existing = getExtractionStems(asset.id)
   for (const [stemId, path] of Object.entries(state.extractedFiles)) {
+    const call = state.calls.find((call, index) => state.callResults?.[index]?.deliveredStemIds.includes(stemId) ||
+      (ALL_ROUTES[call.routeId] && stemId in ALL_ROUTES[call.routeId].delivers))
+    const recipe = stemId === 'other'
+      ? localRecipe({ operation: 'extract', recordedBy: 'mcp', provider: 'local', fromAssetId: asset.id,
+        settings: { stem: stemId, routeIds: state.calls.map((call) => call.routeId), derived: 'original minus every extracted stem' },
+        credits: { provider: 'local', amount: 0, unit: 'none', basis: 'none' } })
+      : existing.find((row) => row.stemId === stemId)?.recipe ?? (call ? extractionRecipe(state, call, stemId) : undefined)
     rows.push(
       upsertExtractionStem({
         projectId: asset.projectId,
         assetId: asset.id,
         stemId,
         path,
-        detectedKey: state.detectedKey
+        detectedKey: state.detectedKey,
+        recipe
       })
     )
   }

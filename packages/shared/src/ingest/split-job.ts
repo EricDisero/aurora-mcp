@@ -6,6 +6,7 @@ import { getAsset } from '../storage/assets.js'
 import { createStemSet, listStoredSets } from '../storage/stem-sets.js'
 import { STEM_LABELS } from '../types.js'
 import type { ImportSplitJobRequest, ImportSplitJobResult, StemType } from '../types.js'
+import { localRecipe, splitJobSettings } from '../recipe.js'
 
 // Port of aurora/src/main/ingest/split-job.ts.
 interface JobOutput {
@@ -24,7 +25,11 @@ export async function importSplitJob(params: ImportSplitJobRequest): Promise<Imp
   let manifest: {
     command?: string
     status?: string
-    args?: { input?: string; mode?: string; bass?: boolean }
+    args?: { input?: string; mode?: string; bass?: boolean; [key: string]: unknown }
+    routes?: unknown
+    options?: unknown
+    taskIds?: unknown
+    finishedAt?: string
     outputs?: JobOutput[]
   }
   try {
@@ -106,6 +111,9 @@ export async function importSplitJob(params: ImportSplitJobRequest): Promise<Imp
       kind: 'import',
       name: params.name?.trim() || basename(dirname(sourcePath)),
       sourcePath,
+      recipe: localRecipe({ operation: 'stem-import', recordedBy: 'mcp', provider: 'mvsep', fromAssetId: assetId,
+        inputs: [{ role: 'upload', path: sourcePath }],
+        settings: splitJobSettings(manifest) }),
       lanes
     })
     return { set, reused: false, skipped }

@@ -4,7 +4,9 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { MvsepError } from './providers/mvsep.js'
 import { SPLIT_ROUTES } from './separation/routes.js'
-import { submitRoute, landRouteResult, type RouteRun, type SubmittedRoute } from './separation/run-route.js'
+import { submitRoute, landRouteResult, routeSpec, type RouteRun, type SubmittedRoute } from './separation/run-route.js'
+import { MVSEP_ALGORITHMS } from './separation/mvsep-catalog.generated.js'
+import { localRecipe } from './recipe.js'
 import type { SeparationProvider, SeparationResult } from './separation/contracts.js'
 import { getAsset, getAssetStemsDir } from './storage/assets.js'
 import { getStems, upsertStem } from './storage/stems.js'
@@ -72,7 +74,11 @@ export async function landSplitJob(
   for (const [stemType, path] of Object.entries(run.stems)) {
     if (stemType === 'drums_bus') continue
     rows.push(upsertStem({ projectId: asset.projectId, assetId: asset.id,
-      stemType: stemType as StemType, path, origin: 'mvsep' }))
+      stemType: stemType as StemType, path, origin: 'mvsep',
+      recipe: localRecipe({ operation: 'split', recordedBy: 'mcp', provider: 'mvsep', fromAssetId: asset.id,
+        model: MVSEP_ALGORITHMS[SPLIT_ROUTES[job].sepType]?.name ?? SPLIT_ROUTES[job].label,
+        modelVersion: SPLIT_ROUTES[job].options.add_opt1 ?? null,
+        settings: { stem: stemType, routeId: SPLIT_ROUTES[job].id, ...routeSpec(SPLIT_ROUTES[job]) } }) }))
   }
   if (job === 'drumsep') {
     const [bus, kick, snare, toms] = await Promise.all(
@@ -82,7 +88,10 @@ export async function landSplitJob(
     const path = join(stemsDir, 'hats.wav')
     await encodeWavFloat32File(path, hats.channels, hats.sampleRate)
     rows.push(upsertStem({ projectId: asset.projectId, assetId: asset.id,
-      stemType: 'hats', path, origin: 'synthesized' }))
+      stemType: 'hats', path, origin: 'synthesized',
+      recipe: localRecipe({ operation: 'split', recordedBy: 'mcp', provider: 'local', fromAssetId: asset.id,
+        settings: { stem: 'hats', routeId: SPLIT_ROUTES.drumsep.id, derived: 'drums bus minus kick, snare and toms' },
+        credits: { provider: 'local', amount: 0, unit: 'none', basis: 'none' } }) }))
   }
   return rows
 }
@@ -94,7 +103,11 @@ export async function finalizeSplit(asset: ProjectAsset, stemsDir: string): Prom
   const other = subtractWavs(original, vocals, drums, bass)
   const path = join(stemsDir, 'other.wav')
   await encodeWavFloat32File(path, other.channels, other.sampleRate)
-  return upsertStem({ projectId: asset.projectId, assetId: asset.id, stemType: 'other', path, origin: 'synthesized' })
+  return upsertStem({ projectId: asset.projectId, assetId: asset.id, stemType: 'other', path, origin: 'synthesized',
+    recipe: localRecipe({ operation: 'split', recordedBy: 'mcp', provider: 'local', fromAssetId: asset.id,
+      settings: { stem: 'other', routeIds: Object.values(SPLIT_ROUTES).map((route) => route.id),
+        derived: 'original minus vocals, drums bus and bass' },
+      credits: { provider: 'local', amount: 0, unit: 'none', basis: 'none' } }) })
 }
 
 /** Same durable path as background work; sibling routes settle before a partial failure is reported. */

@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { getDb } from '../db.js'
 import { normalizeStemId } from '../types.js'
 import type { CreateStemSetParams, StoredStemLane, StoredStemSet } from '../types.js'
+import { deriveStemRecipe, parseRecipe } from '../recipe.js'
 
 // Port of aurora/src/main/storage/stem-sets.ts.
 interface SetRow {
@@ -14,6 +15,7 @@ interface SetRow {
   name: string
   source_path: string | null
   created_at: number
+  recipe: string | null
 }
 
 interface LaneRow {
@@ -37,6 +39,9 @@ function rowToSet(row: SetRow): StoredStemSet {
     name: row.name,
     sourcePath: row.source_path,
     createdAt: row.created_at,
+    recipe:
+      parseRecipe(row.recipe) ??
+      deriveStemRecipe({ table: 'stem_sets', assetId: row.asset_id, origin: row.kind, sourcePath: row.source_path, createdAt: row.created_at }),
     lanes: lanes.map((lane): StoredStemLane => ({
       id: lane.id,
       setId: lane.set_id,
@@ -78,11 +83,14 @@ export function createStemSet(params: CreateStemSetParams): StoredStemSet {
     }
 
     const id = uuidv4()
+    const createdAt = Date.now()
+    const sourcePath = params.sourcePath === undefined ? null : normalize(params.sourcePath)
+    const recipe =
+      params.recipe ?? deriveStemRecipe({ table: 'stem_sets', assetId: params.assetId, origin: params.kind, sourcePath, createdAt })
     db.prepare(
-      `INSERT INTO stem_sets (id, project_id, asset_id, kind, name, source_path, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(id, params.projectId, params.assetId, params.kind, params.name.trim(),
-      params.sourcePath === undefined ? null : normalize(params.sourcePath), Date.now())
+      `INSERT INTO stem_sets (id, project_id, asset_id, kind, name, source_path, created_at, recipe)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, params.projectId, params.assetId, params.kind, params.name.trim(), sourcePath, createdAt, JSON.stringify(recipe))
     const insertLane = db.prepare(
       `INSERT INTO stem_lanes (id, set_id, stem_key, label, path, sort_order)
        VALUES (?, ?, ?, ?, ?, ?)`

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { normalizeStemId, STEM_LABELS } from '../types.js'
 import { EXTRACT_STEM_LABELS } from '../extract-catalog.js'
 import type { LaneView, StemSetView, StemType, StemView } from '../types.js'
+import type { Recipe } from '../recipe.js'
 import { getAsset } from './assets.js'
 import { getStems } from './stems.js'
 import { getExtractionStems } from './extractions.js'
@@ -29,7 +30,7 @@ function laneOrder(stemKey: string): number {
   return 9 + (catalogIndex < 0 ? CATALOG_ORDER.length : catalogIndex)
 }
 
-function lane(setKey: string, stemKey: string, label: string, path: string, sortOrder: number): LaneView {
+function lane(setKey: string, stemKey: string, label: string, path: string, sortOrder: number, recipe: Recipe): LaneView {
   stemKey = normalizeStemId(stemKey)
   return {
     laneId: `${setKey}:${stemKey}`,
@@ -38,7 +39,8 @@ function lane(setKey: string, stemKey: string, label: string, path: string, sort
     path,
     available: existsSync(path),
     group: isDrum(stemKey) ? 'drums' : null,
-    sortOrder
+    sortOrder,
+    recipe
   }
 }
 
@@ -57,7 +59,7 @@ export function getStemView(assetId: string): StemView {
       key: 'split', kind: 'split', name: 'Split',
       lanes: orderDerived(stems.map((stem) => {
         const key = normalizeStemId(stem.stemType)
-        return lane('split', key, STEM_LABELS[key as StemType], stem.path, 0)
+        return lane('split', key, STEM_LABELS[key as StemType], stem.path, 0, stem.recipe)
       }))
     })
   }
@@ -67,7 +69,7 @@ export function getStemView(assetId: string): StemView {
       key: 'extraction', kind: 'extraction', name: 'Extraction',
       lanes: orderDerived(extractions.map((stem) => {
         const key = normalizeStemId(stem.stemId)
-        return lane('extraction', key, EXTRACT_STEM_LABELS[key] ?? key, stem.path, 0)
+        return lane('extraction', key, EXTRACT_STEM_LABELS[key] ?? key, stem.path, 0, stem.recipe)
       }))
     })
   }
@@ -75,7 +77,7 @@ export function getStemView(assetId: string): StemView {
     const key = `set:${set.id}`
     sets.push({
       key, kind: set.kind, name: set.name,
-      lanes: set.lanes.map((item) => lane(key, item.stemKey, item.label, item.path, item.sortOrder))
+      lanes: set.lanes.map((item) => lane(key, item.stemKey, item.label, item.path, item.sortOrder, set.recipe))
         .sort((a, b) => Number(a.stemKey === 'other') - Number(b.stemKey === 'other')
           || a.sortOrder - b.sortOrder)
     })

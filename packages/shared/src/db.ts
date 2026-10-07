@@ -4,16 +4,18 @@
 // out transient writer locks.
 //
 // SCHEMA LOCKSTEP RULE: this file mirrors aurora/src/main/database/migrations.ts
-// at schema version 7. If the app migrates past v7, openDb() refuses to write
+// at schema version 8. If the app migrates past v8, openDb() refuses to write
 // with an "update your aurora-mcp packages" error instead of corrupting newer
 // schema assumptions.
 
+// v8: recipe columns on assets, project stems, extraction stems and stored sets.
+import { deriveAssetRecipe, deriveStemRecipe } from './recipe.js'
 import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { getDbPath, getUserDataDir } from './paths.js'
 
-const KNOWN_SCHEMA_VERSION = 7
+const KNOWN_SCHEMA_VERSION = 8
 
 let db: Database.Database | null = null
 
@@ -324,5 +326,73 @@ function runMigrations(database: Database.Database): void {
       `)
       database.pragma('user_version = 7')
     })()
+  }
+
+  // v8  Recipes — every asset and stem stores what made it (src/shared/recipe.ts).
+  //     ADD COLUMN, no rebuild. Rows made before this get the recipe their
+  //     stored origin and lineage support, with `missing` naming the rest.
+  //     LOCKSTEP: ported to aurora-mcp packages/shared/src/db.ts + KNOWN_SCHEMA_VERSION.
+  if ((database.pragma('user_version', { simple: true }) as number) < 8) {
+    database.transaction(() => {
+      database.exec(`
+        ALTER TABLE project_assets ADD COLUMN recipe TEXT;
+        ALTER TABLE project_stems ADD COLUMN recipe TEXT;
+        ALTER TABLE extraction_stems ADD COLUMN recipe TEXT;
+        ALTER TABLE stem_sets ADD COLUMN recipe TEXT;
+      `)
+      backfillRecipes(database)
+      database.pragma('user_version = 8')
+    })()
+  }
+}
+
+/** Fill every null recipe from what the row stored. Idempotent. */
+export function backfillRecipes(db: Database.Database): void {
+  const assets = db
+    .prepare('SELECT id, kind, origin, source_asset_id, ref_id, created_at FROM project_assets WHERE recipe IS NULL')
+    .all() as { id: string; kind: string; origin: string | null; source_asset_id: string | null; ref_id: string | null; created_at: number }[]
+  const setAsset = db.prepare('UPDATE project_assets SET recipe = ? WHERE id = ?')
+  for (const a of assets) {
+    const r = deriveAssetRecipe({ kind: a.kind, origin: a.origin, sourceAssetId: a.source_asset_id, refId: a.ref_id, createdAt: a.created_at })
+    setAsset.run(JSON.stringify(r), a.id)
+  }
+  const createdOf = db.prepare('SELECT created_at FROM project_assets WHERE id = ?')
+  const assetCreated = (id: string): number | null => (createdOf.get(id) as { created_at: number } | undefined)?.created_at ?? null
+
+  const stems = db.prepare('SELECT id, asset_id, stem_type, origin FROM project_stems WHERE recipe IS NULL').all() as {
+    id: string; asset_id: string; stem_type: string; origin: string
+  }[]
+  const setStem = db.prepare('UPDATE project_stems SET recipe = ? WHERE id = ?')
+  for (const s of stems) {
+    const r = deriveStemRecipe({ table: 'project_stems', assetId: s.asset_id, origin: s.origin, stemKey: s.stem_type, createdAt: assetCreated(s.asset_id) })
+    setStem.run(JSON.stringify(r), s.id)
+  }
+
+  const extracts = db.prepare('SELECT id, asset_id, stem_id, created_at FROM extraction_stems WHERE recipe IS NULL').all() as {
+    id: string; asset_id: string; stem_id: string; created_at: number
+  }[]
+  const setExtract = db.prepare('UPDATE extraction_stems SET recipe = ? WHERE id = ?')
+  for (const e of extracts) {
+    const r = deriveStemRecipe({ table: 'extraction_stems', assetId: e.asset_id, stemKey: e.stem_id, createdAt: e.created_at })
+    setExtract.run(JSON.stringify(r), e.id)
+  }
+
+  const sets = db.prepare('SELECT id, asset_id, kind, source_path, created_at FROM stem_sets WHERE recipe IS NULL').all() as {
+    id: string; asset_id: string; kind: string; source_path: string | null; created_at: number
+  }[]
+  const setSet = db.prepare('UPDATE stem_sets SET recipe = ? WHERE id = ?')
+  for (const s of sets) {
+    const r = deriveStemRecipe({ table: 'stem_sets', assetId: s.asset_id, origin: s.kind, sourcePath: s.source_path, createdAt: s.created_at, job: readJob(s.source_path) })
+    setSet.run(JSON.stringify(r), s.id)
+  }
+}
+
+/** A bridge split's job.json, when the set's source is one still on disk. */
+function readJob(path: string | null): unknown {
+  if (!path || !/job\.json$/i.test(path) || !existsSync(path)) return null
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return null
   }
 }

@@ -1,4 +1,4 @@
-// Copy the app's separation code into this package: the app is the one source, these are generated mirrors.
+// Copy the app's separation code and recipe into this package: the app is the one source, these are generated mirrors.
 //
 //   node scripts/sync-separation.mjs           write the mirrors
 //   node scripts/sync-separation.mjs --check   exit 1 if any mirror differs from what the app would produce
@@ -24,7 +24,8 @@ const FILES = {
   'src/shared/separation/content-check.ts': 'separation/content-check.ts',
   'src/shared/separation/mvsep-catalog.generated.ts': 'separation/mvsep-catalog.generated.ts',
   'src/main/split/run-route.ts': 'separation/run-route.ts',
-  'src/shared/extract-catalog.ts': 'extract-catalog.ts'
+  'src/shared/extract-catalog.ts': 'extract-catalog.ts',
+  'src/shared/recipe.ts': 'recipe.ts'
 }
 const CONTRACT_TYPES = ['MvsepJobSpec', 'SeparationResultFile', 'SeparationResult', 'SeparationProvider']
 
