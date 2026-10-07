@@ -25,7 +25,7 @@ aurora-mcp/
     │     {split,extract}.ts    ← durable orchestration using the generated checked routes
     │     separation-tools.ts   ← free route discovery, provenance and local checks
     │     jobs.ts               ← background-job manifests (userData/agent-jobs/)
-    │     sidecars.ts           ← RVC/MIDI python spawns (need AURORA_REPO env)
+    │     sidecars.ts           ← RVC/MIDI/beat python spawns (need AURORA_REPO env)
     │     audio/{ffmpeg,wav}.ts ← @ffmpeg-installer ops + RIFF codec (port)
     │     operations/index.ts   ← ALL_OPERATIONS: single source of truth for tool surface
     ├── mcp/                    ← @ericdisero/aurora-mcp-server (bin: aurora-mcp-server)
@@ -78,6 +78,7 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 | aurora_get_job_status / list_jobs | Local `jobs.ts` manifests + provider single-shot polls. Status supports `advance` and `waitSeconds` 0–30; advancement can spend. Snapshots never advance. Failed/partial results retain attempts, outputs and diagnostics with `isError:true`. |
 | aurora_pitch_shift / convert | `tools/bridge/lib/ffmpeg-ops.ts` + `commands/{pitch,convert}.ts` |
 | aurora_rvc_upscale / rip_midi | `src/main/rvc/upscale.ts` / `src/main/midi/rip.ts` (same args; resolution via AURORA_REPO) |
+| aurora_beat_grid | App `sidecar-beats/beat_grid.py` (Beat This!) in its own venv, `~/.venvs/aurora-beats`, made by `setup_venv.py`; `AURORA_BEATS_PYTHON` overrides. Free, read-only; core `beat-grid.ts`. |
 | aurora_get_prompting_guide | slates-mcp `resolveGuideTopic` pattern |
 | aurora_get_recipe | App `src/shared/recipe.ts` → generated mirror; local asset/stem/set recipe and lineage read. |
 | aurora_copy_recipe | Same recipe mirror; readable text with source asset names. Free/local. |
@@ -102,6 +103,7 @@ npm run test:agent-bridge # fake loopback desktop + actual command queue, no Ele
 npm run test:stem-sets   # isolated storage/read/import fixtures, free
 npm run test:recipes     # isolated v8 backfill, recipe reads/reuse and variation plans, offline
 npm run test:stem-tools  # synthetic waveform/loudness/export fixtures, offline
+npm run test:beat-grid   # synthetic house loop; skips the engine run without the venv
 node packages/cli/dist/index.js status
 ```
 

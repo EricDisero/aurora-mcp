@@ -2,7 +2,7 @@
 
 MCP server, CLI and agent skills for Aurora, the AI audio workbench. Agents generate music, organize the local library, split audio into seven stems and extract selected instrument groups. Files land in the project folders shared with the desktop app through SQLite and disk; the app does not need to be running.
 
-Version **0.6.1**: **54 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
+Version **0.6.1**: **55 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
 
 ## What agents can do
 
@@ -13,6 +13,7 @@ Version **0.6.1**: **54 tools** and **5 skills**. The complete tool surface, par
 - Split an asset into vocals, kick, snare, toms, hats, bass and Other using three measured MVSEP routes plus local phase cancellation. Checked stems land progressively as each route finishes.
 - Extract whole groups, individual instruments and vocal modes. Group ids come from [`GROUP_ROUTES`](packages/shared/src/separation/routes.ts); discover them with `aurora_list_separation_routes` using `surface: "extract group"`. Extraction shares bundled calls and builds Other locally.
 - Discover route quality/evidence, plan without spending, inspect separation checks, resume jobs and cancel future work. Convert or pitch-shift files locally; RVC/MIDI sidecars require the Aurora repo and their Python dependencies.
+- Read the exact beat grid of any audio file with `aurora_beat_grid` (Beat This!, ISMIR 2024): tempo from a least-squares fit over every beat, beats, downbeats, meter, first downbeat, the constant-tempo residual and the offset to the kick transients. Free and local; needs the one-time Python environment described below.
 
 Mix, mastering and Export remain interactive desktop flows. An app-control bridge for agents driving the live Mix/Export is deliberately out of scope for now.
 
@@ -99,6 +100,15 @@ Suno generation, covers, layering, editing and provider WAV conversion spend cre
 
 Route discovery, local checks, job snapshots/cancellation, library operations and local audio processing do not spend provider credits. `aurora_get_credits` is a free network balance read. Existing active split work or seven valid stems are reused without another submission. Deleting assets/projects or stored stem-set rows requires `confirm: true`.
 
+## Beat grid
+
+```bash
+python <aurora checkout>/sidecar-beats/setup_venv.py   # once: ~/.venvs/aurora-beats, torch + Beat This! + weights (CPU; --cuda for GPU)
+aurora run aurora_beat_grid --path <audio file> --bpmHint 120 --json
+```
+
+`aurora_beat_grid` takes an `assetId` or an absolute `path` and any format the bundled ffmpeg reads. `bpm` is a least-squares line through every beat (the model's own beats sit on a 20 ms frame grid, so `bpmMedian` reads coarser); `fit.rmsMs` says how constant that tempo is, `kick.gridMedianOffsetMs` how far the grid sits from the kick transients (use it only when `kick.reliable`), and `hint` compares the result with the tempo you expected without changing it. The op finds the environment at `~/.venvs/aurora-beats` (`AURORA_BEATS_PYTHON` overrides) and the script in the app checkout beside this repo or at `AURORA_REPO`. Without the environment it fails with `ENGINE_NOT_INSTALLED` and the setup command.
+
 ## Development and free tests
 
 With dependencies installed, run from the repo root:
@@ -111,6 +121,7 @@ npm run test:contract
 npm run test:surface
 npm run test:stem-sets
 npm run test:recipes
+npm run test:beat-grid
 ```
 
 The tests use isolated libraries and offline fixtures; no Suno/MVSEP spend. `npm run typecheck` checks mirror drift, builds shared declarations and checks MCP/CLI. It needs the Aurora app checkout beside this repo, or `AURORA_REPO` pointing to it.

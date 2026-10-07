@@ -89,6 +89,7 @@ import { checkSeparationOutputs, listSeparationRoutes, planSeparationRoute } fro
 import { SPLIT_ROUTES } from '../separation/routes.js'
 import { probeDurationSeconds, standardizeToWav, convertToMp3, pitchShift } from '../audio/ffmpeg.js'
 import { runRipMidi, runRvcUpscale } from '../sidecars.js'
+import { beatGridSchema, detectBeatGrid } from '../beat-grid.js'
 import { SKILLS } from '../skills/content.js'
 import { STEM_LABELS, normalizeStemId, type StemType, type JobError, type ProjectAsset, type SeparationAttempt } from '../types.js'
 
@@ -2500,6 +2501,30 @@ const ripMidiOp: Operation<{
   }
 }
 
+const beatGridOp: Operation<{ assetId?: string; path?: string; bpmHint?: number }> = {
+  id: 'aurora_beat_grid',
+  annotations: { title: 'Detect beat grid', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  outputSchema: outputSchema(beatGridSchema.extend({ source: z.object({ assetId: z.string().nullable(), path: z.string() }) })),
+  description: "Free local beat, downbeat and tempo analysis with Beat This! (ISMIR 2024) in Aurora's own Python environment: assetId or absolute path, optional bpmHint (the expected tempo; reported against, never forced). Analyse the full mix, not a stem without a pulse. Returns bpm (least-squares line through every beat) and bpmMedian (median inter-beat interval); firstDownbeatS (that fitted grid, finer than the model's 20 ms frames) and firstDownbeatDetectedS; meter (beats per bar from downbeat spacing) with meterConfidence; beats[] and downbeats[] in seconds; fit.rmsMs/maxAbsMs, how far the beats stray from one constant tempo (about 6 ms is the floor; above 20 ms the tempo is not constant, so trust beats[] over bpm); kick, the median offset in ms between the grid (gridMedianOffsetMs) or detected beats (medianOffsetMs) and the leading edge of the 30-150 Hz envelope at each beat, positive = kick after the grid line, trustworthy only when kick.reliable (four-on-the-floor); hint {ratio, relation same|double|half|other, slideMs over the file}; engine name and version. Read-only: no uploads, no credits, no library writes. If the engine is missing the error names the one-time setup command.",
+  input: z.object({
+    assetId: z.string().optional().describe('Library asset to analyse'),
+    path: z.string().optional().describe('OR an absolute audio file path'),
+    bpmHint: z.number().min(20).max(400).optional().describe('Expected tempo in BPM, e.g. the BPM the prompt asked for; the result reports the ratio and relation to it')
+  }),
+  async run(input, context) {
+    const { path, asset } = resolveAudioInput(input)
+    const grid = await detectBeatGrid(path, { bpmHint: input.bpmHint, signal: context?.signal }).catch((error) => {
+      assertNotAborted(context)   // a cancelled request kills the sidecar; report the cancellation, not the kill
+      throw error
+    })
+    const meter = grid.meter === null ? 'meter unknown' : `${grid.meter} beats per bar`
+    return ok({ ...grid, source: { assetId: asset?.id ?? null, path } },
+      `${grid.bpm} BPM (median ${grid.bpmMedian}), ${meter}, first downbeat ${grid.firstDownbeatS ?? 'not found'} s, ` +
+      `${grid.beats.length} beats, fit residual ${grid.fit.rmsMs} ms rms, kick offset ${grid.kick.gridMedianOffsetMs ?? 'n/a'} ms` +
+      `${grid.kick.reliable ? '' : ' (not reliable: no four-on-the-floor kick)'}; ${grid.engine.name} ${grid.engine.version} on ${grid.engine.device}.`)
+  }
+}
+
 // ── Skills delivery (MCP-only clients) ──────────────────────────
 
 const listSeparationRoutesOp: Operation<{ surface?: string; group?: string }> = {
@@ -2661,6 +2686,7 @@ const operationDefinitions = [
   convertOp,
   rvcUpscaleOp,
   ripMidiOp,
+  beatGridOp,
   getPromptingGuideOp
 ] as unknown as ReadonlyArray<Operation<unknown>>
 

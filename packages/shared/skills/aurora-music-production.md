@@ -43,6 +43,7 @@ Failed identity or audio checks save nothing from the failed job and report the 
 - Project folder: `generations/ covers/ imports/ references/ stems/<asset>/ masters/`.
 - MP3 lands first; `aurora_fetch_wav` upgrades a generation/cover to provider WAV (~0.4 credits).
 - `aurora_pitch_shift` and `aurora_convert` are FREE local ffmpeg ops.
+- `aurora_beat_grid` is a FREE local analysis op (Beat This!): the exact tempo, beats, downbeats, meter and first downbeat of any asset or file. Measure a take with it instead of trusting the BPM in the prompt: Suno takes asked for 120 BPM came back at 91 and 117. Pass `bpmHint` to see the ratio and drift against the tempo you wanted; trust `kick.gridMedianOffsetMs` only when `kick.reliable`. It needs a one-time Python environment: the error names the setup command.
 - Mastering (analyze → mix → export) lives in the Aurora app window — point the user there once stems exist; it is not agent-drivable yet.
 
 ## Suno prompting quick rules

@@ -39,7 +39,7 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 54)
+  assert.equal(tools.length, 55)
   for (const name of ['aurora_get_recipe', 'aurora_copy_recipe', 'aurora_reuse_prompt', 'aurora_reuse_reference', 'aurora_make_variations']) {
     assert.ok(tools.some((tool) => tool.name === name), `${name} listed on first request`)
   }
@@ -50,6 +50,11 @@ try {
     assert.equal(tool.annotations!.openWorldHint, false)
     assert.equal(tool.annotations!.destructiveHint, false)
   }
+  const beatGrid = tools.find((tool) => tool.name === 'aurora_beat_grid')!
+  assert.ok(beatGrid, 'aurora_beat_grid listed on first request')
+  assert.deepEqual(
+    [beatGrid.annotations!.readOnlyHint, beatGrid.annotations!.destructiveHint, beatGrid.annotations!.idempotentHint, beatGrid.annotations!.openWorldHint],
+    [true, false, true, false])
   assert.ok(tools.some((tool) => tool.name === 'aurora_get_view'))
   assert.ok(tools.some((tool) => tool.name === 'aurora_set_view'))
   for (const tool of tools) {

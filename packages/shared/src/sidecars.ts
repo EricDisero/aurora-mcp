@@ -8,14 +8,19 @@
 //   4. installed app resources (best-effort known install locations)
 // Missing → a clear, actionable error (the sidecars also need their Python
 // deps / PyInstaller freeze — see aurora/CLAUDE.md Status).
+//
+// The beat sidecar (Beat This!) is different: it runs in its own venv, made once by
+// aurora/sidecar-beats/setup_venv.py, so it resolves a venv python plus a script
+// (resolveBeatsSidecar below).
 
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-interface ResolvedSidecar {
+export interface ResolvedSidecar {
   command: string
   baseArgs: string[]
 }
@@ -63,22 +68,62 @@ function resolveSidecar(
   return { resolved: null, searched }
 }
 
-function runSidecar(resolved: ResolvedSidecar, args: string[]): Promise<{ stderrTail: string }> {
+/** Run a sidecar to completion. stdout is JSON lines (progress, or the one result of the beat sidecar); a failed run
+ *  rejects with the stderr tail and the stdout on `error.stdout`. An aborted signal kills the process. */
+export function runSidecar(
+  resolved: ResolvedSidecar,
+  args: string[],
+  signal?: AbortSignal
+): Promise<{ stdout: string; stderrTail: string }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(resolved.command, [...resolved.baseArgs, ...args], { windowsHide: true })
+    const proc = spawn(resolved.command, [...resolved.baseArgs, ...args], { windowsHide: true, signal })
+    let stdout = ''
     let stderr = ''
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString()
     })
-    proc.stdout.on('data', () => {
-      // JSON-lines progress — consumed silently in the MCP (blocking call).
+    proc.stdout.on('data', (d: Buffer) => {
+      stdout += d.toString()
     })
     proc.on('error', reject)
     proc.on('close', (code) => {
-      if (code === 0) resolve({ stderrTail: stderr.slice(-2000) })
-      else reject(new Error(`sidecar exited ${code}: ${stderr.slice(-2000)}`))
+      if (code === 0) resolve({ stdout, stderrTail: stderr.slice(-2000) })
+      else reject(Object.assign(new Error(`sidecar exited ${code}: ${stderr.slice(-2000)}`), { stdout }))
     })
   })
+}
+
+/** Python of Aurora's Beat This! environment: AURORA_BEATS_PYTHON, else the venv setup_venv.py makes in ~/.venvs
+ *  (where Aurora's other engine environments live). */
+export function beatsPythonPath(): string {
+  return process.env.AURORA_BEATS_PYTHON ||
+    join(homedir(), '.venvs', 'aurora-beats', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python']))
+}
+
+/** The beat sidecar: the environment's python running aurora/sidecar-beats/beat_grid.py, found through AURORA_REPO or
+ *  the app checkout beside this repo (as scripts/sync-separation.mjs does). Throws an error that carries the fix. */
+export function resolveBeatsSidecar(): ResolvedSidecar {
+  const python = beatsPythonPath()
+  const scripts = [
+    process.env.AURORA_REPO,
+    fileURLToPath(new URL('../../../../aurora/', import.meta.url))
+  ].filter((repo): repo is string => Boolean(repo)).map((repo) => join(repo, 'sidecar-beats', 'beat_grid.py'))
+  const script = scripts.find((path) => existsSync(path))
+  const notInstalled = (message: string, nextAction: string): Error =>
+    Object.assign(new Error(message), { code: 'ENGINE_NOT_INSTALLED', retryable: false, nextAction })
+  if (!script) {
+    throw notInstalled(
+      `Beat sidecar script not found. Searched: ${scripts.join(' | ') || '(none)'}.`,
+      'Set AURORA_REPO to the aurora app checkout (it holds sidecar-beats/), then retry.'
+    )
+  }
+  if (!existsSync(python)) {
+    throw notInstalled(
+      `Aurora's beat engine (Beat This!) is not installed: ${python} is missing.`,
+      `Run once: python "${join(dirname(script), 'setup_venv.py')}" (needs uv or Python 3.10-3.12; downloads CPU torch and 81 MB of weights), then retry.`
+    )
+  }
+  return { command: python, baseArgs: [script] }
 }
 
 export interface RvcUpscaleParams {
