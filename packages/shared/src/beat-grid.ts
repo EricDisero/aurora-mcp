@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 import { standardizeToWav } from './audio/ffmpeg.js'
-import { resolveBeatsSidecar, runSidecar } from './sidecars.js'
+import { beatsSetupCommand, resolveBeatsSidecar, runSidecar } from './sidecars.js'
 
 export const beatGridSchema = z.object({
   engine: z.object({ name: z.string(), version: z.string(), checkpoint: z.string(), postprocessor: z.string(),
@@ -48,15 +48,20 @@ export async function detectBeatGrid(inputPath: string, options: BeatGridOptions
   const scratch = await mkdtemp(join(tmpdir(), 'aurora-beats-'))
   try {
     const wav = join(scratch, 'input.wav')
-    await standardizeToWav(inputPath, wav)
+    await standardizeToWav(inputPath, wav, options.signal)
     const args = ['--in', wav, '--device', options.device ?? 'auto']
     if (options.bpmHint) args.push('--bpm-hint', String(options.bpmHint))
     let stdout: string
     try {
       ;({ stdout } = await runSidecar(sidecar, args, options.signal))
     } catch (error) {
-      // The sidecar reports an analysis it could not make as {"error": ...} on stdout with exit code 2.
+      // The sidecar reports an analysis it could not make as {"error": ...} on stdout with exit code 2, and missing or
+      // rejected weights as code ENGINE_NOT_INSTALLED (it never downloads them during an analysis).
       const reported = lastJson((error as { stdout?: string }).stdout ?? '')
+      if (reported && reported.code === 'ENGINE_NOT_INSTALLED' && typeof reported.error === 'string') {
+        throw Object.assign(new Error(reported.error), { code: 'ENGINE_NOT_INSTALLED', retryable: false,
+          nextAction: `Run once: ${beatsSetupCommand(sidecar)}, then retry.` })
+      }
       if (reported && typeof reported.error === 'string') throw analysisFailure(reported.error)
       throw error
     }

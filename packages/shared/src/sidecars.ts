@@ -100,6 +100,11 @@ export function beatsPythonPath(): string {
     join(homedir(), '.venvs', 'aurora-beats', ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python']))
 }
 
+/** The one-time setup command for the beat environment, given its resolved sidecar (its script sits beside it). */
+export function beatsSetupCommand(sidecar: ResolvedSidecar): string {
+  return `python "${join(dirname(sidecar.baseArgs[0]), 'setup_venv.py')}"`
+}
+
 /** The beat sidecar: the environment's python running aurora/sidecar-beats/beat_grid.py, found through AURORA_REPO or
  *  the app checkout beside this repo (as scripts/sync-separation.mjs does). Throws an error that carries the fix. */
 export function resolveBeatsSidecar(): ResolvedSidecar {

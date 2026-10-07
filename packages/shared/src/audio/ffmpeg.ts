@@ -11,9 +11,10 @@ export function getFfmpegPath(): string {
   return ffmpegInstaller.path
 }
 
-export function runFfmpeg(args: string[]): Promise<void> {
+/** Run the bundled ffmpeg to completion; an aborted signal kills it. */
+export function runFfmpeg(args: string[], signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(getFfmpegPath(), args, { windowsHide: true })
+    const proc = spawn(getFfmpegPath(), args, { windowsHide: true, signal })
     let stderr = ''
     proc.stderr.on('data', (d: Buffer) => {
       stderr += d.toString()
@@ -47,8 +48,8 @@ export function probeDurationSeconds(inputPath: string): Promise<number | null> 
 /** Standardize an arbitrary input to 44.1kHz stereo 32-bit float WAV — the
  *  single preprocessed format fed to MVSEP jobs and the `other` phase-cancel
  *  reference (aurora's standardizeToWav, verbatim args). */
-export async function standardizeToWav(inputPath: string, outputPath: string): Promise<void> {
-  await runFfmpeg(['-y', '-i', inputPath, '-ac', '2', '-ar', '44100', '-c:a', 'pcm_f32le', outputPath])
+export async function standardizeToWav(inputPath: string, outputPath: string, signal?: AbortSignal): Promise<void> {
+  await runFfmpeg(['-y', '-i', inputPath, '-ac', '2', '-ar', '44100', '-c:a', 'pcm_f32le', outputPath], signal)
 }
 
 let rubberbandCache: boolean | null = null

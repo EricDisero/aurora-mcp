@@ -3,7 +3,7 @@
 // without it only the missing-engine guidance is checked and the rest is skipped. Build first (npm run build).
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -56,9 +56,6 @@ function houseLoop() {
   return x.map((v) => (v / peak) * 0.9)
 }
 
-const originalFetch = globalThis.fetch
-let networkAttempts = 0
-globalThis.fetch = async () => { networkAttempts++; throw new Error('Beat grid must stay offline') }
 try {
   const loop = join(scratch, 'house-120.wav')
   await writeFile(loop, encodeWavFloat32([houseLoop()], RATE))
@@ -82,6 +79,21 @@ try {
   if (!existsSync(beatsPythonPath())) {
     console.log(`SKIP engine checks: ${beatsPythonPath()} is missing (run python aurora/sidecar-beats/setup_venv.py)`)
   } else {
+    // Missing weights: an analysis never downloads them (only setup_venv.py does); it returns the typed
+    // missing-engine error and leaves the empty cache empty.
+    const emptyCache = join(scratch, 'empty-torch-cache')
+    await mkdir(emptyCache)
+    const torchHome = process.env.TORCH_HOME
+    process.env.TORCH_HOME = emptyCache
+    const noWeights = await op.run({ path: loop })
+    if (torchHome === undefined) delete process.env.TORCH_HOME
+    else process.env.TORCH_HOME = torchHome
+    assert.equal(noWeights.isError, true)
+    assert.equal(noWeights.structuredContent.error.code, 'ENGINE_NOT_INSTALLED', JSON.stringify(noWeights.structuredContent))
+    assert.match(noWeights.structuredContent.error.nextAction, /setup_venv\.py/)
+    assert.deepEqual(await readdir(emptyCache, { recursive: true }), [], 'nothing was downloaded')
+    console.log('PASS missing weights: ENGINE_NOT_INSTALLED, no download')
+
     const first = await op.run({ path: loop, bpmHint: BPM })
     assert.ok(!first.isError, JSON.stringify(first.structuredContent))
     const grid = first.structuredContent
@@ -116,10 +128,8 @@ try {
     assert.equal(byAsset.structuredContent.bpm, grid.bpm)
     console.log('PASS by asset id')
   }
-  assert.equal(networkAttempts, 0)
   console.log('Beat grid checks passed.')
 } finally {
-  globalThis.fetch = originalFetch
   closeDb()
   if (previousUserData === undefined) delete process.env.AURORA_USER_DATA
   else process.env.AURORA_USER_DATA = previousUserData
