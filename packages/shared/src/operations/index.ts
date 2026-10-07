@@ -10,7 +10,9 @@
 import { join, extname, basename, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
 import { z } from 'zod'
-import { AuroraDesktopClient, viewCommandSchema, viewReadSchema, viewAckSchema } from '../clients/desktop.js'
+import { AuroraDesktopClient, DesktopError, viewCommandSchema, viewReadSchema, viewAckSchema } from '../clients/desktop.js'
+import { getDb } from '../db.js'
+import { localRecipe, recipeText, recipeRefusal, reusableAncestor, reusePlan, creditsFor, type Recipe } from '../recipe.js'
 import { v4 as uuidv4 } from 'uuid'
 import { getDbPath, getProjectsDirectory, getUserDataDir } from '../paths.js'
 import { getMvsepKey, getSunoKey, getKieKey } from '../config.js'
@@ -65,9 +67,10 @@ import {
   renameTrack
 } from '../storage/tracks.js'
 import { getProjectStems, getStems } from '../storage/stems.js'
+import { getExtractionStems } from '../storage/extractions.js'
 import { getStemView } from '../storage/stem-view.js'
 import { getStemPeaks, measureStems, exportStems } from '../stem-tools.js'
-import { createStemSet, deleteStemSet } from '../storage/stem-sets.js'
+import { createStemSet, deleteStemSet, listStoredSets } from '../storage/stem-sets.js'
 import { importSplitJob } from '../ingest/split-job.js'
 import { advanceJob, cancelJob, isJobActive, listJobs, loadJob, newJobManifest, saveJob, startSplitJob, type JobManifest } from '../jobs.js'
 import { prepareExtract } from '../extract.js'
@@ -137,19 +140,20 @@ const trackSchema = projectSchema.extend({ projectId: z.string(), sortOrder: z.n
 const assetSchema = z.object({ id: z.string(), projectId: z.string(), trackId: z.string().nullable().optional(),
   kind: z.enum(['generation', 'cover', 'track', 'master']), name: z.string(), path: z.string(),
   origin: z.record(z.unknown()).nullable().optional(), sourceAssetId: z.string().nullable().optional(),
-  refId: z.string().nullable().optional(), favorite: z.boolean(), createdAt: z.number() }).passthrough()
-const stemSchema = z.object({ stemType: z.string(), path: z.string() }).passthrough()
+  refId: z.string().nullable().optional(), favorite: z.boolean(), createdAt: z.number(),
+  recipe: z.record(z.unknown()) }).passthrough()
+const stemSchema = z.object({ stemType: z.string(), path: z.string(), recipe: z.record(z.unknown()).optional() }).passthrough()
 const stemLaneSchema = z.object({ stemKey: z.string(), label: z.string(), path: z.string() })
 const storedSetSchema = z.object({
   id: z.string(), projectId: z.string(), assetId: z.string(), kind: z.enum(['import', 'custom']),
-  name: z.string(), sourcePath: z.string().nullable(), createdAt: z.number(),
+  name: z.string(), sourcePath: z.string().nullable(), createdAt: z.number(), recipe: z.record(z.unknown()),
   lanes: z.array(stemLaneSchema.extend({ id: z.string(), setId: z.string(), sortOrder: z.number() }))
 })
 const stemViewSchema = z.object({
   asset: z.object({ id: z.string(), projectId: z.string(), trackId: z.string().nullable(), name: z.string(), path: z.string() }),
   sets: z.array(z.object({ key: z.string(), kind: z.enum(['split', 'extraction', 'import', 'custom']), name: z.string(),
     lanes: z.array(stemLaneSchema.extend({ laneId: z.string(), available: z.boolean(),
-      group: z.literal('drums').nullable(), sortOrder: z.number() })) }))
+      group: z.literal('drums').nullable(), sortOrder: z.number(), recipe: z.record(z.unknown()).optional() })) }))
 })
 const attemptSchema = z.object({
   routeId: z.string(), status: z.enum(['pending', 'submitting', 'accepted', 'landed', 'failed', 'uncertain']),
@@ -235,7 +239,7 @@ const getViewOp: Operation<Record<string, never>> = {
 
 const setViewOp: Operation<z.infer<typeof viewCommandSchema>> = {
   id: 'aurora_set_view',
-  description: 'Change the running Aurora view when the user asks to show or open something. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. Use list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation, playback or mastering is performed.',
+  description: 'Change the running Aurora view when the user asks to show or open something. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. composer loads fromAssetId, mode, fields and notes on a desktop advertising composer-load; use reuse_prompt/reuse_reference to derive them. Use list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation, playback or mastering is performed.',
   input: viewCommandSchema,
   outputSchema: outputSchema(viewAckSchema),
   annotations: { title: 'Change desktop view', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -774,6 +778,156 @@ const deleteAssetOp: Operation<{ assetId: string; confirm?: boolean }> = {
   }
 }
 
+const recipeSubjectInput = z.object({ assetId: z.string().min(1).optional(), stemId: z.string().min(1).optional() })
+  .strict().refine((input) => (input.assetId === undefined) !== (input.stemId === undefined), 'Provide exactly one assetId or stemId')
+type RecipeSubject = { subject: { type: 'asset' | 'stem' | 'extraction' | 'stemSet'; id: string; name: string }; recipe: Recipe }
+const nameOfAsset = (id: string): string | null => getAsset(id)?.name ?? null
+const recipeOfAsset = (id: string): Recipe | null => getAsset(id)?.recipe ?? null
+
+function findRecipe(input: z.infer<typeof recipeSubjectInput>): RecipeSubject {
+  if (input.assetId) {
+    const asset = getAsset(input.assetId)
+    if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
+    return { subject: { type: 'asset', id: asset.id, name: asset.name }, recipe: asset.recipe }
+  }
+  // Table names are fixed here; only the exact subject id is a query parameter.
+  for (const table of ['project_stems', 'extraction_stems', 'stem_sets'] as const) {
+    const row = getDb().prepare(`SELECT asset_id FROM ${table} WHERE id = ?`).get(input.stemId) as { asset_id: string } | undefined
+    if (!row) continue
+    if (table === 'project_stems') {
+      const stem = getStems(row.asset_id).find((stem) => stem.id === input.stemId)!
+      return { subject: { type: 'stem', id: stem.id, name: STEM_LABELS[stem.stemType] }, recipe: stem.recipe }
+    }
+    if (table === 'extraction_stems') {
+      const stem = getExtractionStems(row.asset_id).find((stem) => stem.id === input.stemId)!
+      return { subject: { type: 'extraction', id: stem.id, name: EXTRACT_STEM_LABELS[stem.stemId] ?? stem.stemId }, recipe: stem.recipe }
+    }
+    const set = listStoredSets(row.asset_id).find((set) => set.id === input.stemId)!
+    return { subject: { type: 'stemSet', id: set.id, name: set.name }, recipe: set.recipe }
+  }
+  throw new Error(`Stem not found: ${input.stemId}`)
+}
+
+const getRecipeOp: Operation<z.infer<typeof recipeSubjectInput>> = {
+  id: 'aurora_get_recipe',
+  description: 'Free local read: exactly one assetId or stemId returns its stored recipe, subject name/type, readable text, reuse refusal and nearest reusable asset id. stemId accepts project stems, extraction stems or stored stem-set ids. Legacy rows expose what could be recovered and list missing facts. Nothing uploads or spends. Call aurora_copy_recipe for text, or aurora_reuse_prompt / aurora_reuse_reference to plan another take.',
+  input: recipeSubjectInput,
+  outputSchema: outputSchema(z.object({ subject: z.object({ type: z.enum(['asset', 'stem', 'extraction', 'stemSet']), id: z.string(), name: z.string() }),
+    recipe: z.record(z.unknown()), text: z.string(), refusal: z.string().nullable(), reusableFrom: z.string().nullable() })),
+  annotations: { title: 'Read recipe', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async run(input) {
+    const found = findRecipe(input)
+    const refusal = recipeRefusal(found.recipe)
+    return ok({ ...found, text: recipeText(found.recipe, nameOfAsset), refusal,
+      reusableFrom: reusableAncestor(found.recipe, recipeOfAsset)?.assetId ?? (refusal ? null : found.subject.id) })
+  }
+}
+
+const copyRecipeOp: Operation<z.infer<typeof recipeSubjectInput>> = {
+  id: 'aurora_copy_recipe',
+  description: 'Free local read: exactly one assetId or stemId returns only text containing the complete readable recipe, source names, settings, cost and missing facts. Does not write the clipboard, upload or spend. Use aurora_get_recipe for structured provenance or aurora_reuse_prompt to plan a new take.',
+  input: recipeSubjectInput,
+  outputSchema: outputSchema(z.object({ text: z.string() })),
+  annotations: { title: 'Copy recipe text', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  async run(input) { return ok({ text: recipeText(findRecipe(input).recipe, nameOfAsset) }) }
+}
+
+function reusableRecipe(assetId: string): { recipe: Recipe; fromAssetId: string } {
+  const { recipe } = findRecipe({ assetId })
+  const ancestor = reusableAncestor(recipe, recipeOfAsset)
+  if (!ancestor) throw new Error(recipeRefusal(recipe) ?? 'No reusable recipe was recorded')
+  return { recipe: ancestor.recipe, fromAssetId: ancestor.assetId ?? assetId }
+}
+
+/** The app stores provider wire names; these three MCP adapters use different input names. */
+function recipeReusePlan(recipe: Recipe, withReference: boolean): ReturnType<typeof reusePlan> {
+  const plan = reusePlan(recipe, { withReference, knownModels: SUNO_MODELS, fallbackModel: DEFAULT_SUNO_MODEL })
+  if (plan.call) {
+    const args = plan.call.args
+    if (args.model !== undefined) args.model = plan.fields.model
+    if (args.vocalGender === null) delete args.vocalGender
+    if (plan.call.op === 'aurora_generate' && args.prompt === undefined) args.prompt = plan.fields.prompt ?? ''
+    if (plan.call.op === 'aurora_sounds') {
+      if (args.soundTempo !== undefined) args.tempo = args.soundTempo
+      if (args.soundLoop !== undefined) args.loop = args.soundLoop
+      delete args.soundTempo; delete args.soundLoop
+    }
+    if (plan.call.op === 'aurora_replace_section') {
+      if (args.tags === undefined && recipe.style) args.tags = recipe.style
+      args.startS = args.infillStartS; args.endS = args.infillEndS
+      delete args.infillStartS; delete args.infillEndS
+    }
+    if (plan.call.op === 'aurora_mashup') {
+      if (args.sourceAssetId !== undefined) args.sourceAssetIdA = args.sourceAssetId
+      if (args.sourcePath !== undefined) args.sourcePathA = args.sourcePath
+      delete args.sourceAssetId; delete args.sourcePath
+    }
+  }
+  return plan
+}
+
+const reuseInput = z.object({ assetId: z.string().min(1), loadInApp: z.boolean().default(true) }).strict()
+const reuseCallSchema = z.object({ op: z.string(), args: z.record(z.unknown()) })
+const reuseOutput = outputSchema(z.object({ loaded: z.boolean(), reason: z.string().optional(), call: reuseCallSchema.nullable(),
+  fields: z.record(z.unknown()), notes: z.array(z.string()), acknowledgement: viewAckSchema.optional() }))
+
+function reuseOperation(withReference: boolean): Operation<z.input<typeof reuseInput>> {
+  const mode = withReference ? 'reference' : 'prompt'
+  return {
+    id: withReference ? 'aurora_reuse_reference' : 'aurora_reuse_prompt',
+    description: `Free recipe reuse: assetId resolves its reusable recipe or nearest generation ancestor and returns the exact MCP call, composer fields and recovery notes. ${withReference ? 'Keeps the transform source audio as its reference.' : 'Reuses the words; transforms become song generation without their source audio.'} loadInApp defaults true: a connected desktop with composer-load loads Create and returns its acknowledgement; otherwise loaded:false includes the reason and plan. Never generates, uploads or spends. Inspect the plan, then call its target operation or aurora_make_variations with explicit confirmation.`,
+    input: reuseInput,
+    outputSchema: reuseOutput,
+    annotations: { title: `Reuse ${mode}`, readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    async run(input, context) {
+      const { recipe, fromAssetId } = reusableRecipe(input.assetId)
+      const plan = recipeReusePlan(recipe, withReference)
+      if (input.loadInApp === false) return ok({ loaded: false, reason: 'loadInApp is false', ...plan })
+      try {
+        const acknowledgement = await (context?.desktop?.() ?? new AuroraDesktopClient()).setView({ requestId: uuidv4(),
+          patch: { page: 'create', composer: { fromAssetId, mode, fields: { ...plan.fields }, notes: plan.notes } } })
+        return ok({ loaded: acknowledgement.status === 'applied',
+          ...(acknowledgement.status === 'applied' ? {} : { reason: acknowledgement.reasons.join('; ') }),
+          ...plan, acknowledgement })
+      } catch (error) {
+        if (!(error instanceof DesktopError)) throw error
+        return ok({ loaded: false, reason: error.message, ...plan })
+      }
+    }
+  }
+}
+const reusePromptOp = reuseOperation(false)
+const reuseReferenceOp = reuseOperation(true)
+
+const variationsInput = z.object({ assetId: z.string().min(1), count: z.number().int().min(1).max(5).default(1), confirm: z.boolean().optional() }).strict()
+const makeVariationsOp: Operation<z.input<typeof variationsInput>> = {
+  id: 'aurora_make_variations',
+  description: 'Plan 1..5 Suno calls from assetId using its reusable recipe or generation ancestor with the source reference retained. count defaults 1; each Suno call returns two takes. Without confirm:true this is a free local plan returning planned count, exact call and estimated credits per call (unknown prices remain null). With confirm:true it spends credits by running that operation once per count, returns background job results and stops after any failure. Inspect aurora_get_recipe first; advance returned jobs with aurora_get_job_status rather than repeating this tool.',
+  input: variationsInput,
+  outputSchema: outputSchema(z.object({ planned: z.number().int(), call: reuseCallSchema,
+    estimatedCredits: z.array(z.record(z.unknown())), note: z.string().optional(), results: z.array(objectData).optional() })),
+  annotations: { title: 'Plan or make variations', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  async run(input, context) {
+    const { recipe } = reusableRecipe(input.assetId)
+    const plan = recipeReusePlan(recipe, true)
+    if (!plan.call) throw new Error('No reusable provider call was recorded')
+    const count = input.count ?? 1
+    const data = { planned: count, call: plan.call, estimatedCredits: Array.from({ length: count }, () => creditsFor(recipe.operation)) }
+    if (input.confirm !== true) return ok({ ...data, note: 'Pass confirm: true to run' })
+    const target = ALL_OPERATIONS.find((op) => op.id === plan.call!.op)
+    if (!target) throw new Error(`Unknown recipe operation: ${plan.call.op}`)
+    const args = target.input.parse({ ...plan.call.args, background: true })
+    const results: OperationResult[] = []
+    for (let i = 0; i < count; i++) {
+      assertNotAborted(context)
+      const result = await target.run(args, context)
+      results.push(result)
+      if (result.isError) break
+    }
+    return { ...ok({ ...data, results }), ...(results.some((result) => result.isError) ? { isError: true } : {}) }
+  }
+}
+
 const getStemViewOp: Operation<{ assetId: string }> = {
   id: 'aurora_get_stem_view',
   annotations: { title: 'Read asset stem sets', readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -876,6 +1030,9 @@ const createStemSetOp: Operation<{ assetId: string; name: string; lanes: Array<{
     const asset = getAsset(input.assetId)
     if (!asset) throw new Error(`Asset not found: ${input.assetId}`)
     const set = createStemSet({ projectId: asset.projectId, assetId: asset.id, kind: 'custom', name: input.name,
+      recipe: localRecipe({ operation: 'stem-set', recordedBy: 'mcp', fromAssetId: asset.id,
+        settings: { lanes: input.lanes.map((lane) => normalizeStemId(lane.stemKey)) },
+        inputs: input.lanes.map((lane) => ({ role: 'source', path: lane.path })) }),
       lanes: input.lanes.map((lane) => {
         const stemKey = normalizeStemId(lane.stemKey)
         return { ...lane, stemKey, label: lane.label ?? STEM_LABELS[stemKey as StemType] ?? EXTRACT_STEM_LABELS[stemKey] ?? stemKey }
@@ -1324,6 +1481,7 @@ const coverOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.params.sourcePath = sourceAsset ? null : sourcePath
     manifest.trackId = trackId
     await saveJob(manifest)
 
@@ -1439,6 +1597,7 @@ const addVocalsOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.params.sourcePath = sourceAsset ? null : sourcePath
     manifest.trackId = trackId
     await saveJob(manifest)
 
@@ -1550,6 +1709,7 @@ const addInstrumentalOp: Operation<{
       },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.params.sourcePath = sourceAsset ? null : sourcePath
     manifest.trackId = trackId
     await saveJob(manifest)
 
@@ -1736,6 +1896,7 @@ const extendOp: Operation<{
       { op: 'extend', route, ...shared, vocalGender: input.vocalGender ?? null },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.params.sourcePath = sourceAsset ? null : sourcePath
     manifest.trackId = trackId
     await saveJob(manifest)
     return finishDerivedJob(manifest, input, context)
@@ -1815,9 +1976,12 @@ const replaceSectionOp: Operation<{
       `rep-${uuidv4().slice(0, 8)}`,
       projectId,
       baseName,
-      { op: 'replace_section', route, ...common, model: route === 'upload' ? model : undefined, instrumental: false },
+      { op: 'replace_section', route, ...common,
+        model: route === 'upload' ? model : sourceAsset?.recipe.model ?? sourceAsset?.origin?.model,
+        instrumental: false },
       { taskId, sourceAssetId: sourceAsset?.id ?? null }
     )
+    manifest.params.sourcePath = sourceAsset ? null : sourcePath
     manifest.trackId = trackId
     await saveJob(manifest)
     return finishDerivedJob(manifest, input, context)
@@ -1930,7 +2094,9 @@ const mashupOp: Operation<{
         styleWeight: input.styleWeight,
         weirdnessConstraint: input.weirdnessConstraint,
         audioWeight: input.audioWeight,
-        sourceB: b.sourceAsset?.id ?? b.sourcePath
+        sourcePath: a.sourceAsset ? null : a.sourcePath,
+        sourceAssetIdB: b.sourceAsset?.id ?? null,
+        sourcePathB: b.sourceAsset ? null : b.sourcePath
       },
       { taskId, sourceAssetId: a.sourceAsset?.id ?? null }
     )
@@ -2134,7 +2300,9 @@ const pitchShiftOp: Operation<{
         name: basename(outPath, extname(outPath)),
         path: outPath,
         origin: { tool: 'pitch_shift', semitones: input.semitones, engine, sourceAssetId: asset.id },
-        sourceAssetId: asset.id
+        sourceAssetId: asset.id,
+        recipe: localRecipe({ operation: 'pitch-shift', recordedBy: 'mcp', fromAssetId: asset.id,
+          settings: { semitones: input.semitones, preserveTempo: input.preserveTempo ?? false, format, engine } })
       })
     }
     return ok({ outputPath: outPath, engine, asset: newAsset })
@@ -2168,7 +2336,8 @@ const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' 
         name: basename(outPath, extname(outPath)),
         path: outPath,
         origin: { tool: 'convert', to: input.to, sourceAssetId: asset.id },
-        sourceAssetId: asset.id
+        sourceAssetId: asset.id,
+        recipe: localRecipe({ operation: 'convert', recordedBy: 'mcp', fromAssetId: asset.id, settings: { to: input.to } })
       })
     }
     return ok({ outputPath: outPath, asset: newAsset })
@@ -2379,6 +2548,11 @@ const operationDefinitions = [
   importFileOp,
   addReferenceOp,
   deleteAssetOp,
+  getRecipeOp,
+  copyRecipeOp,
+  reusePromptOp,
+  reuseReferenceOp,
+  makeVariationsOp,
   getStemViewOp,
   getStemPeaksOp,
   measureStemsOp,

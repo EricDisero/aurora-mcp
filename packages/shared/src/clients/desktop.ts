@@ -5,14 +5,16 @@ import { z } from 'zod'
 
 // Wire contract mirrored from aurora/src/main/agent/protocol.ts; the free bridge test checks it.
 export const DESKTOP_PROTOCOL_VERSION = 1
-export const DESKTOP_CAPABILITIES = ['view', 'view-set', 'request-ack'] as const
+export const DESKTOP_CAPABILITIES = ['view', 'view-set', 'request-ack', 'composer-load'] as const
 export const DESKTOP_PAGES = ['create', 'library', 'extract', 'finish', 'split', 'settings'] as const
 const id = z.string().trim().min(1).max(256)
 export const viewPatchSchema = z.object({
   page: z.enum(DESKTOP_PAGES).optional(),
   openAssetId: id.nullable().optional(),
   selectedAssetIds: z.array(id).max(500).optional(),
-  libraryTrackId: id.nullable().optional()
+  libraryTrackId: id.nullable().optional(),
+  composer: z.object({ fromAssetId: id, mode: z.enum(['prompt', 'reference', 'variations']),
+    fields: z.record(z.unknown()), notes: z.array(z.string()) }).strict().optional()
 }).strict().refine((patch) => Object.keys(patch).length > 0, 'Name at least one view field')
 export const viewCommandSchema = z.object({
   requestId: z.string().trim().min(1).max(128),
@@ -104,7 +106,7 @@ export class AuroraDesktopClient {
   async setView(input: ViewCommand): Promise<ViewAck> {
     const command = viewCommandSchema.parse(input)
     let connection: z.infer<typeof connectionSchema>
-    try { connection = await this.connect('view-set') }
+    try { connection = await this.connect(command.patch.composer ? 'composer-load' : 'view-set') }
     catch (error) {
       if (error instanceof DesktopError && error.code === 'DESKTOP_NOT_CONNECTED') return {
         connected: false, requestId: command.requestId, status: 'rejected', state: null, revision: null, reasons: [error.message]

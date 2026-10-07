@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ProgressNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
-import { ALL_OPERATIONS, SKILLS } from '@ericdisero/aurora-shared'
+import { ALL_OPERATIONS, SKILLS, loadJob } from '@ericdisero/aurora-shared'
 import { createAuroraServer, SERVER_INSTRUCTIONS } from './server.js'
 
 /** A mono 32-bit float WAV, written here so the test needs nothing outside the published packages. */
@@ -39,7 +39,10 @@ try {
   assert.ok(SERVER_INSTRUCTIONS.length <= 512)
   const { tools } = await client.listTools()
   assert.equal(tools.length, ALL_OPERATIONS.length)
-  assert.equal(tools.length, 46)
+  assert.equal(tools.length, 51)
+  for (const name of ['aurora_get_recipe', 'aurora_copy_recipe', 'aurora_reuse_prompt', 'aurora_reuse_reference', 'aurora_make_variations']) {
+    assert.ok(tools.some((tool) => tool.name === name), `${name} listed on first request`)
+  }
   for (const name of ['aurora_get_stem_peaks', 'aurora_measure_stems', 'aurora_export_stems']) {
     const tool = tools.find((tool) => tool.name === name)!
     assert.ok(tool, `${name} listed on first request`)
@@ -175,6 +178,23 @@ try {
   assert.deepEqual(partialResult.structuredContent?.requestedStemIds, ['piano', 'strings'])
   assert.equal(partialResult.structuredContent?.detectedKey, 'C major')
   assert.equal((partialResult.structuredContent?.callResults as unknown[]).length, 1)
+  // Confirmed variation jobs join the connection worker. No provider handles: they fail locally.
+  const variation = ALL_OPERATIONS.find((op) => op.id === 'aurora_make_variations')!
+  const realVariationRun = variation.run
+  const variationIds = ['gen-variation-one', 'gen-variation-two']
+  for (const jobId of variationIds) {
+    await writeFile(join(scratch, 'agent-jobs', `${jobId}.json`), JSON.stringify({ ...job, jobId }))
+  }
+  try {
+    variation.run = async () => {
+      const data = { planned: 2, call: { op: 'aurora_generate', args: {} }, estimatedCredits: [],
+        results: variationIds.map((jobId) => ({ structuredContent: { jobId, status: 'queued' } })) }
+      return { text: 'Stubbed variation jobs', data, structuredContent: data }
+    }
+    await callTool({ name: 'aurora_make_variations', arguments: { assetId: 'stub', count: 2, confirm: true } })
+    await new Promise((resolve) => setTimeout(resolve, 6000))
+    for (const jobId of variationIds) assert.equal((await loadJob(jobId))?.status, 'failed', 'Variation job advanced by connection worker')
+  } finally { variation.run = realVariationRun }
   const prompts = await client.listPrompts()
   assert.equal(prompts.prompts.length, 6)
   assert.ok((await client.getPrompt({ name: 'aurora-separation' })).messages.length)

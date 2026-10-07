@@ -37,9 +37,9 @@ aurora-mcp/
 
 - **Never duplicate operation logic.** Both surfaces register the same `ALL_OPERATIONS` array. New tool = one edit in `packages/shared/src/operations/index.ts`.
 - **Op schemas expose the FULL wire surface with sane defaults — curation is the app's job, never the MCP's** (locked 2026-06-10; the agent layer ships with MORE control than the app, never less). Param contract for the Suno ops: `docs/suno-param-surface.md`.
-- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` through v7 (v6: leftover stem id `other`, WAV paths unchanged; v7: stored `stem_sets` and `stem_lanes`). `KNOWN_SCHEMA_VERSION` refuses newer DBs. Port every new app migration here in the same session and bump that constant.
+- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` through v8 (v6: leftover stem id `other`, WAV paths unchanged; v7: stored `stem_sets` and `stem_lanes`; v8: recipe columns on assets, stems, extractions and stored sets). `KNOWN_SCHEMA_VERSION` refuses newer DBs. Port every new app migration here in the same session and bump that constant.
 - **Storage-semantics lockstep.** `storage/*.ts` ports the app's modules; behavior changes go into BOTH codebases or neither. Split/extract orchestration consumes the app's generated separation contract (table below).
-- **Never edit separation mirrors.** `packages/shared/src/separation/*.ts` and `extract-catalog.ts` are GENERATED from the app by `scripts/sync-separation.mjs` (with ESM import adaptation/provider-interface extraction). Fix the app, then resync. `--check` runs in `npm run typecheck`; drift fails the check.
+- **Never edit generated mirrors.** `packages/shared/src/separation/*.ts`, `extract-catalog.ts` and `recipe.ts` are GENERATED from the app by `scripts/sync-separation.mjs` (with ESM import adaptation/provider-interface extraction). Fix the app, then resync. `--check` runs in `npm run typecheck`; drift fails the check.
 - **Check before landing.** Use canonical exact-key resolution and route content checks, never substring/list-order matching. Every submission uses a unique upload name. Failed identity/content checks save no stems for that route. A check pass is not proof of musical purity; report family/replay limits.
 - **Persist before spending.** Split integration uses `startSplitJob(assetId)` then `advanceJob`; untracked `createSplitJobs` is refused. Split/extract default to queued background jobs. Status defaults to advancement and can spend; `advance:false` and `list_jobs` are local snapshots. MCP advances only jobs started/resumed through its connection; CLI callers advance explicitly. Cancellation stops subsequent units after any in-flight interaction settles; accepted provider work may still run without refund.
 - **Provider URLs expire server-side.** Always download-and-persist; `streamUrls` are preview-only, never stored as asset paths.
@@ -78,6 +78,11 @@ Storage/provider ports follow these app sources; agent jobs and surface adapters
 | aurora_pitch_shift / convert | `tools/bridge/lib/ffmpeg-ops.ts` + `commands/{pitch,convert}.ts` |
 | aurora_rvc_upscale / rip_midi | `src/main/rvc/upscale.ts` / `src/main/midi/rip.ts` (same args; resolution via AURORA_REPO) |
 | aurora_get_prompting_guide | slates-mcp `resolveGuideTopic` pattern |
+| aurora_get_recipe | App `src/shared/recipe.ts` → generated mirror; local asset/stem/set recipe and lineage read. |
+| aurora_copy_recipe | Same recipe mirror; readable text with source asset names. Free/local. |
+| aurora_reuse_prompt | Same recipe mirror; words-only call plan, optional desktop `composer-load` acknowledgement. No spend. |
+| aurora_reuse_reference | Same recipe mirror; source-preserving plan and optional `composer-load`. No spend. |
+| aurora_make_variations | Same recipe mirror; free plan until `confirm:true`, then the target operation's background jobs (two takes per call). |
 
 Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
 
@@ -94,6 +99,7 @@ npm run test:contract    # isolated MCP audio contracts, free
 npm run test:surface     # offline operation surface checks, free
 npm run test:agent-bridge # fake loopback desktop + actual command queue, no Electron
 npm run test:stem-sets   # isolated storage/read/import fixtures, free
+npm run test:recipes     # isolated v8 backfill, recipe reads/reuse and variation plans, offline
 npm run test:stem-tools  # synthetic waveform/loudness/export fixtures, offline
 node packages/cli/dist/index.js status
 ```

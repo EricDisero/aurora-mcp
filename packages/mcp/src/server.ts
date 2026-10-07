@@ -85,9 +85,15 @@ export function createAuroraServer(): Server {
     const data = result.structuredContent
     // Pure snapshots and cancellation do not start/resume paid work.
     if (!extra.signal.aborted && !op.annotations.readOnlyHint && op.id !== 'aurora_cancel_job' &&
-      !(op.id === 'aurora_get_job_status' && request.params.arguments?.advance === false) &&
-      typeof data.jobId === 'string' && ['queued', 'submitting', 'waiting', 'landing', 'running'].includes(String(data.status))) {
-      worker.watch(data.jobId)
+      !(op.id === 'aurora_get_job_status' && request.params.arguments?.advance === false)) {
+      const jobs = op.id === 'aurora_make_variations' && request.params.arguments?.confirm === true && Array.isArray(data.results)
+        ? data.results.map((result: { structuredContent: Record<string, unknown> }) => result.structuredContent)
+        : [data]
+      for (const job of jobs) {
+        if (typeof job?.jobId === 'string' && ['queued', 'submitting', 'waiting', 'landing', 'running'].includes(String(job.status))) {
+          worker.watch(job.jobId)
+        }
+      }
     }
     return toolResult(result)
   })

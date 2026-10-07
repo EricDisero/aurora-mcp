@@ -119,7 +119,8 @@ async function smoke() {
       })
     }
     await check('new tool discovery', () => {
-      const missing = ['aurora_list_separation_routes', 'aurora_check_separation_result', 'aurora_cancel_job']
+      const missing = ['aurora_list_separation_routes', 'aurora_check_separation_result', 'aurora_cancel_job',
+        'aurora_get_recipe', 'aurora_copy_recipe', 'aurora_reuse_prompt', 'aurora_reuse_reference', 'aurora_make_variations']
         .filter((name) => !tools.some((tool) => tool.name === name))
       assert.equal(missing.length, 0, `missing ${missing.join(', ')}`)
     })
