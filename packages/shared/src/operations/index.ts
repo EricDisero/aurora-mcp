@@ -8,7 +8,9 @@
 //     to the app-integration follow-up)
 
 import { join, extname, basename, dirname } from 'node:path'
-import { existsSync } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
+import { copyFile, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { z } from 'zod'
 import { AuroraDesktopClient, DesktopError, viewCommandSchema, viewReadSchema, viewAckSchema } from '../clients/desktop.js'
 import { getDb } from '../db.js'
@@ -55,7 +57,8 @@ import {
   setAssetFavorite,
   setAssetRefId,
   setAssetTrack,
-  updateAssetPath
+  updateAssetPath,
+  uniqueDestPath
 } from '../storage/assets.js'
 import { addReference } from '../storage/references.js'
 import {
@@ -237,10 +240,31 @@ const getViewOp: Operation<Record<string, never>> = {
   }
 }
 
+const composerFieldsSchema = z.object({
+  tab: z.enum(['song', 'remix', 'sounds']),
+  remixVerb: z.enum(['cover', 'addVocals', 'addInstrumental']),
+  customMode: z.boolean(), prompt: z.string().max(6000), style: z.string().max(6000), title: z.string().max(6000),
+  model: z.string().refine((model) => SUNO_MODELS.some((value) => value === normalizeModel(model)), 'Unknown Suno model'),
+  instrumental: z.boolean(), vocalGender: z.enum(['male', 'female']).nullable(), negativeTags: z.string().max(6000),
+  styleWeight: z.number().finite().min(0).max(1), weirdness: z.number().finite().min(0).max(1),
+  sourceAssetId: z.string().max(6000), sourcePath: z.string().max(6000), audioWeight: z.number().finite().min(0).max(1),
+  soundKey: z.string().max(6000), soundTempo: z.string().max(6000), soundLoop: z.boolean(),
+  duration: z.string().refine((value) => value === '' || (/^[0-9]+$/.test(value) && Number(value) >= 10 && Number(value) <= 360),
+    'Duration must be empty or whole seconds from 10 to 360'),
+  variety: z.number().int().min(0).max(4).nullable(), grabLyrics: z.boolean()
+}).partial().strict()
+const composerCommandSchema = viewCommandSchema.superRefine((command, ctx) => {
+  if (!command.patch.composer) return
+  const fields = composerFieldsSchema.safeParse(command.patch.composer.fields)
+  if (!fields.success) for (const issue of fields.error.issues) {
+    ctx.addIssue({ ...issue, path: ['patch', 'composer', 'fields', ...issue.path] })
+  }
+})
+
 const setViewOp: Operation<z.infer<typeof viewCommandSchema>> = {
   id: 'aurora_set_view',
   description: 'Change the running Aurora view when the user asks to show or open something. patch.page: create/library (same home), extract, finish/split, or settings (modal over the current route). openAssetId selects the working asset in the open project; from home it opens Split, otherwise it keeps the route; null clears it. selectedAssetIds replaces Library checkboxes; Library must be showing and ids must belong to the open project; selections persist across Library filters. libraryTrackId focuses Library on a track folder in the open project; null shows All, "unfiled" shows unfiled. composer loads fromAssetId, mode, fields and notes on a desktop advertising composer-load; use reuse_prompt/reuse_reference to derive them. Use list_assets/list_tracks for ids. Supply a unique requestId and optionally expectedRevision from get_view. Duplicate ids return the first result for this app process, even after a timeout. Only applied confirms every requested field; partial/rejected give reasons. uncertain means no confirmed outcome: read get_view or retrieve the first result with the SAME requestId before doing more. No generation, separation, playback or mastering is performed.',
-  input: viewCommandSchema,
+  input: composerCommandSchema,
   outputSchema: outputSchema(viewAckSchema),
   annotations: { title: 'Change desktop view', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   async run(input, context) {
@@ -460,6 +484,25 @@ function resolveAudioInput(input: { assetId?: string; path?: string }): {
     return { path: input.path, asset: null }
   }
   throw new Error('Provide either assetId or path.')
+}
+
+async function writeAudioCopy<T>(sourcePath: string, fileName: string, render: (path: string) => Promise<T>): Promise<{ outputPath: string; result: T }> {
+  const scratch = await mkdtemp(join(tmpdir(), 'aurora-audio-'))
+  try {
+    const renderedPath = join(scratch, fileName)
+    const result = await render(renderedPath)
+    for (;;) {
+      const outputPath = uniqueDestPath(dirname(sourcePath), fileName)
+      try {
+        await copyFile(renderedPath, outputPath, constants.COPYFILE_EXCL)
+        return { outputPath, result }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 }
 
 // ── Identity / workspace ────────────────────────────────────────
@@ -696,6 +739,9 @@ const setAssetTrackOp: Operation<{ assetId: string; trackId: string | null }> = 
       .describe('Target track id, or null to move the asset back to the project root')
   }),
   async run(input, context) {
+    const source = getAsset(input.assetId)
+    if (!source) throw new Error(`Asset not found: ${input.assetId}`)
+    if (input.trackId !== null) getTrackDirectory(input.trackId, source.projectId)
     const asset = await setAssetTrack(input.assetId, input.trackId)
     return ok({ asset })
   }
@@ -884,8 +930,9 @@ function reuseOperation(withReference: boolean): Operation<z.input<typeof reuseI
       const plan = recipeReusePlan(recipe, withReference)
       if (input.loadInApp === false) return ok({ loaded: false, reason: 'loadInApp is false', ...plan })
       try {
-        const acknowledgement = await (context?.desktop?.() ?? new AuroraDesktopClient()).setView({ requestId: uuidv4(),
+        const command = composerCommandSchema.parse({ requestId: uuidv4(),
           patch: { page: 'create', composer: { fromAssetId, mode, fields: { ...plan.fields }, notes: plan.notes } } })
+        const acknowledgement = await (context?.desktop?.() ?? new AuroraDesktopClient()).setView(command)
         return ok({ loaded: acknowledgement.status === 'applied',
           ...(acknowledgement.status === 'applied' ? {} : { reason: acknowledgement.reasons.join('; ') }),
           ...plan, acknowledgement })
@@ -2275,12 +2322,12 @@ const pitchShiftOp: Operation<{
   id: 'aurora_pitch_shift',
   annotations: { title: 'Pitch shift locally', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   outputSchema: outputSchema(z.object({ outputPath: z.string(), engine: z.string(), asset: assetSchema.nullable() })),
-  description: "Free local audio processing: assetId or absolute path and required semitones. preserveTempo defaults false (varispeed); format defaults wav, optional mp3. Writes a sibling output and registers a new asset when input is an asset. Returns outputPath, engine and nullable asset. Repeating can overwrite output and add another row; list assets or import into the DAW next.",
+  description: "Free local audio processing: assetId or absolute path and required semitones. preserveTempo defaults true; false explicitly enables varispeed. format defaults wav, optional mp3. Writes a unique sibling output and registers a new asset in the source folder when input is an asset. Returns outputPath, engine and nullable asset. Existing files are never overwritten; repeating creates another copy. List assets or import into the DAW next.",
   input: z.object({
     assetId: z.string().optional(),
     path: z.string().optional().describe('OR an absolute file path'),
     semitones: z.number().describe('e.g. 3, -2, 0.5'),
-    preserveTempo: z.boolean().optional(),
+    preserveTempo: z.boolean().default(true).describe('Keep the source tempo (default true); false enables varispeed'),
     format: z.enum(['wav', 'mp3']).optional().describe('Output format (default wav)')
   }),
   async run(input, context) {
@@ -2288,21 +2335,22 @@ const pitchShiftOp: Operation<{
     const format = input.format ?? 'wav'
     const stem = basename(path, extname(path))
     const sign = input.semitones >= 0 ? '+' : ''
-    const outPath = join(dirname(path), `${stem}${sign}${input.semitones}st.${format}`)
-
-    const engine = await pitchShift(path, outPath, input.semitones, input.preserveTempo ?? false, format)
+    const preserveTempo = input.preserveTempo ?? true
+    const { outputPath: outPath, result: engine } = await writeAudioCopy(path, `${stem}${sign}${input.semitones}st.${format}`,
+      (outputPath) => pitchShift(path, outputPath, input.semitones, preserveTempo, format))
 
     let newAsset: ProjectAsset | null = null
     if (asset) {
       newAsset = insertAsset({
         projectId: asset.projectId,
+        trackId: asset.trackId,
         kind: 'track',
         name: basename(outPath, extname(outPath)),
         path: outPath,
         origin: { tool: 'pitch_shift', semitones: input.semitones, engine, sourceAssetId: asset.id },
         sourceAssetId: asset.id,
         recipe: localRecipe({ operation: 'pitch-shift', recordedBy: 'mcp', fromAssetId: asset.id,
-          settings: { semitones: input.semitones, preserveTempo: input.preserveTempo ?? false, format, engine } })
+          settings: { semitones: input.semitones, preserveTempo, format, engine } })
       })
     }
     return ok({ outputPath: outPath, engine, asset: newAsset })
@@ -2313,7 +2361,7 @@ const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' 
   id: 'aurora_convert',
   annotations: { title: 'Convert local audio', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   outputSchema: outputSchema(z.object({ outputPath: z.string(), asset: assetSchema.nullable() })),
-  description: "Free local ffmpeg conversion: assetId or absolute path and required to (wav or mp3). WAV is 44.1 kHz stereo float32; MP3 is 320k CBR. Writes a sibling file and creates an asset for asset inputs. Returns outputPath and nullable asset. Repeating may overwrite and duplicate library rows. List assets or use the output path in the DAW.",
+  description: "Free local ffmpeg conversion: assetId or absolute path and required to (wav or mp3). WAV is 44.1 kHz stereo float32; MP3 is 320k CBR. Writes a unique sibling file and creates an asset in the source folder for asset inputs. Returns outputPath and nullable asset. Existing files are never overwritten; repeating creates another copy. List assets or use the output path in the DAW.",
   input: z.object({
     assetId: z.string().optional(),
     path: z.string().optional(),
@@ -2323,15 +2371,14 @@ const convertOp: Operation<{ assetId?: string; path?: string; to: 'wav' | 'mp3' 
     const { path, asset } = resolveAudioInput(input)
     const stem = basename(path, extname(path))
     const sameExt = extname(path).toLowerCase() === `.${input.to}`
-    const outPath = join(dirname(path), `${stem}${sameExt ? '-converted' : ''}.${input.to}`)
-
-    if (input.to === 'wav') await standardizeToWav(path, outPath)
-    else await convertToMp3(path, outPath)
+    const { outputPath: outPath } = await writeAudioCopy(path, `${stem}${sameExt ? '-converted' : ''}.${input.to}`,
+      (outputPath) => input.to === 'wav' ? standardizeToWav(path, outputPath) : convertToMp3(path, outputPath))
 
     let newAsset: ProjectAsset | null = null
     if (asset) {
       newAsset = insertAsset({
         projectId: asset.projectId,
+        trackId: asset.trackId,
         kind: 'track',
         name: basename(outPath, extname(outPath)),
         path: outPath,

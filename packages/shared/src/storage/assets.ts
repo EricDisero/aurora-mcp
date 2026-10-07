@@ -59,7 +59,7 @@ function rowToAsset(row: AssetRow): ProjectAsset {
 /** The base dir an asset's files live under: the track subfolder if filed to a
  *  track, else the project root (unfiled / legacy layout). */
 function getAssetBaseDir(projectId: string, trackId: string | null | undefined): string {
-  return trackId ? getTrackDirectory(trackId) : getProjectDirectory(projectId)
+  return trackId ? getTrackDirectory(trackId, projectId) : getProjectDirectory(projectId)
 }
 
 export function listAssets(projectId: string): ProjectAsset[] {

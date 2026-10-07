@@ -56,11 +56,14 @@ function uniqueDirName(projectId: string, name: string): string {
 }
 
 /** Absolute path to a track's subfolder under its project. */
-export function getTrackDirectory(trackId: string): string {
+export function getTrackDirectory(trackId: string, projectId?: string): string {
   const row = getDb()
     .prepare('SELECT project_id, dir_name FROM tracks WHERE id = ?')
     .get(trackId) as { project_id: string; dir_name: string | null } | undefined
   if (!row) throw new Error(`track not found: ${trackId}`)
+  if (projectId !== undefined && row.project_id !== projectId) {
+    throw new Error('The folder must belong to the same project as the asset.')
+  }
   return join(getProjectDirectory(row.project_id), row.dir_name || trackId)
 }
 
