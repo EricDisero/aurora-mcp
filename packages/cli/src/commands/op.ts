@@ -101,7 +101,11 @@ function coerceForSchema(schema: unknown, raw: Record<string, unknown>): Record<
     }
     shape?: Record<string, ZodLike>
   }
-  const zodObj = schema as ZodLike
+  // A refined schema (superRefine) wraps its object in ZodEffects: look inside.
+  let zodObj = schema as ZodLike
+  for (let depth = 0; zodObj?._def?.typeName === 'ZodEffects' && depth < 8; depth++) {
+    zodObj = zodObj._def.schema as ZodLike
+  }
   if (zodObj?._def?.typeName !== 'ZodObject') return raw
 
   const shape: Record<string, ZodLike> =
@@ -146,6 +150,14 @@ function coerceForSchema(schema: unknown, raw: Record<string, unknown>): Record<
       return Number.isFinite(n) ? n : value
     }
     if (fieldType === 'ZodBoolean') return value === 'true' || value === '1'
+    // Object fields (set_view's patch, for one) arrive as JSON text.
+    if (fieldType === 'ZodObject' || fieldType === 'ZodRecord') {
+      try {
+        return JSON.parse(value)
+      } catch {
+        return value
+      }
+    }
     return value
   }
 
