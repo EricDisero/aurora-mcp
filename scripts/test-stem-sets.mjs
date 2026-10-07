@@ -157,7 +157,7 @@ try {
 
   const realPath = 'C:/Users/Eric/AppData/Roaming/aurora/projects/untitled-project-2/track-7/splits/20261006-085049-t7-ambient-drone-a-4-v6-v1/job.json'
   const snapshot = join(dirname(fileURLToPath(import.meta.url)), 'stem-sets-fixture.json')
-  const useReal = !process.argv.includes('--snapshot') && existsSync(realPath)
+  const useReal = process.argv.includes('--real') && existsSync(realPath)
   const real = JSON.parse(await readFile(useReal ? realPath : snapshot, 'utf8'))
   real.args.input = input
   for (const output of real.outputs) output.path = await wav(join(scratch, 'real-copy', 'stems', `${output.label}.wav`))

@@ -1,13 +1,11 @@
 // Synthetic output identity checked through MCP alone; never submits a provider job.
 import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { withIsolatedServer } from './smoke-mcp.mjs'
 
 const sampleRate = 44_100
 const seconds = 3
-const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 
 function floatWav(samples) {
   const bytes = Buffer.alloc(44 + samples.length * 4)
@@ -27,7 +25,7 @@ function floatWav(samples) {
   return bytes
 }
 
-async function writeFixtures() {
+async function writeFixtures(fixtureDir) {
   // Sparse decaying hits have more 10 ms energy variation than a sustained tone.
   // Round each stem to Float32 before summing, as on real WAVs.
   const drums = new Float32Array(sampleRate * seconds)
@@ -50,8 +48,8 @@ async function writeFixtures() {
 }
 
 async function main() {
-  const paths = await writeFixtures()
-  await withIsolatedServer(async (client) => {
+  await withIsolatedServer(async (client, tempRoot) => {
+    const paths = await writeFixtures(join(tempRoot, 'fixtures'))
     // Discovery lets the SDK validate returned structured content against outputSchema.
     await client.listTools({}, { timeout: 10_000 })
     const failures = []
