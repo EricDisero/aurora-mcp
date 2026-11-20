@@ -27,7 +27,7 @@ export type RecipeOperation =
   | 'convert'
   | 'unknown'
 
-export type RecipeProvider = 'sunoapi' | 'kie' | 'ace-step' | 'mvsep' | 'local'
+export type RecipeProvider = 'sunoapi' | 'kie' | 'ace-step' | 'elevenlabs' | 'mvsep' | 'local'
 
 export interface RecipeInput {
   /** source: the audio a transform worked on. reference: a match or style
@@ -116,6 +116,7 @@ const SUNO_PRICE: Partial<Record<RecipeOperation, number | null>> = {
 const LOCAL_OPERATIONS: RecipeOperation[] = ['import', 'master', 'stem-import', 'stem-set', 'pitch-shift', 'convert']
 
 export function creditsFor(operation: RecipeOperation, provider?: RecipeProvider | null): RecipeCredits {
+  if (provider === 'elevenlabs') return { provider, amount: null, unit: 'none', basis: 'unknown' }
   if (LOCAL_OPERATIONS.includes(operation)) return { provider: 'local', amount: 0, unit: 'none', basis: 'none' }
   if (operation in SUNO_PRICE) {
     const amount = SUNO_PRICE[operation] ?? null
@@ -135,6 +136,7 @@ const NOT_SETTINGS = new Set<string>([
   ...WORD_KEYS,
   'taskId',
   'audioId',
+  'songId',
   'artworkPath',
   'durationSeconds',
   'tags',
@@ -208,7 +210,7 @@ export interface GenerationRecipeArgs {
   createdAt?: number
 }
 
-/** The recipe of a Suno generation, sound or transform, from its request. */
+/** The recipe of a music generation, sound or transform, from its request. */
 export function generationRecipe(a: GenerationRecipeArgs): Recipe {
   const p = a.params
   const inputs: RecipeInput[] = []
@@ -454,11 +456,12 @@ export function deriveStemRecipe(row: StemRowForRecipe): Recipe {
 const SUNO_OPERATIONS: RecipeOperation[] = ['generate', 'sounds', 'cover', 'add-vocals', 'add-instrumental', 'extend', 'replace-section', 'mashup']
 
 export function isPromptRecipe(r: Recipe | null): boolean {
-  return !!r && SUNO_OPERATIONS.includes(r.operation)
+  return !!r && r.provider !== 'elevenlabs' && SUNO_OPERATIONS.includes(r.operation)
 }
 
 /** Why Reuse cannot run on this recipe, or null when it can. */
 export function recipeRefusal(r: Recipe | null): string | null {
+  if (r?.provider === 'elevenlabs') return 'This recipe is available to copy. Reuse for this music generator is currently available through the CLI.'
   if (!r) return 'No recipe was recorded'
   if (isPromptRecipe(r)) return null
   if (r.operation === 'import' || r.operation === 'stem-import') return 'Imported, so no prompt was recorded'

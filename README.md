@@ -2,7 +2,9 @@
 
 MCP server, CLI and agent skills for Aurora, the AI audio workbench. Agents generate music, organize the local library, split audio into seven stems and extract selected instrument groups. Files land in the project folders shared with the desktop app through SQLite and disk; the app does not need to be running.
 
-Version **0.6.2**: **55 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
+Version **0.6.2**: **56 tools** and **5 skills**. The complete tool surface, parameters, defaults and effects live in [`ALL_OPERATIONS`](packages/shared/src/operations/index.ts), available through MCP `tools/list` or `aurora run --list`.
+
+For Eleven Music v2.5, run `aurora run aurora_generate_eleven_music --projectId <id> --title <title> --durationSeconds 30 --prompt <prompt>`. Set `ELEVENLABS_API_KEY` to a key with Music Generation access. The command is paid and saves the provider MP3 and generation recipe in the selected Aurora project. Set `--instrumental false` to allow voices.
 
 ## What agents can do
 

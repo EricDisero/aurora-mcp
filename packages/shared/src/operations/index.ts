@@ -9,7 +9,7 @@
 
 import { join, extname, basename, dirname } from 'node:path'
 import { constants, existsSync } from 'node:fs'
-import { copyFile, mkdtemp, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { z } from 'zod'
 import { AuroraDesktopClient, DesktopError, viewCommandSchema, viewReadSchema, viewAckSchema } from '../clients/desktop.js'
@@ -40,17 +40,20 @@ import {
   uploadAudioFile
 } from '../providers/suno.js'
 import { getMvsepUserInfo, separationError } from '../providers/mvsep.js'
+import { composeMusic, ELEVEN_MUSIC_FORMAT, ELEVEN_MUSIC_MODEL } from '../providers/eleven-music.js'
 import {
   createProject,
   deleteProject,
   getProject,
   getProjectDirectory,
   listProjects,
-  renameProject
+  renameProject,
+  slugify
 } from '../storage/projects.js'
 import {
   addFileAsset,
   deleteAsset,
+  ensureKindDir,
   getAsset,
   insertAsset,
   listAssets,
@@ -1192,6 +1195,42 @@ const personaModelSchema = z
   .enum(['style_persona', 'voice_persona'])
   .optional()
   .describe('style_persona (default) | voice_persona (set when personaId is a Suno Voice voiceId; V5_5 and the V6 family)')
+
+const elevenMusicInput = z.object({
+  prompt: z.string().trim().min(1).max(4100),
+  durationSeconds: z.number().min(3).max(600),
+  title: z.string().trim().min(1).max(100),
+  instrumental: z.boolean().default(true),
+  projectId: z.string().min(1),
+  trackId: landingTrackIdSchema
+}).strict()
+
+const elevenMusicOp: Operation<z.input<typeof elevenMusicInput>> = {
+  id: 'aurora_generate_eleven_music',
+  description: 'PAID Eleven Music v2.5 text-to-music. Generates one take and saves the original 48 kHz MP3 to an existing Aurora project or track. Set instrumental false to allow wordless choir or other voices. Submit only after prompt and cost approval. This call waits for the audio and does not retry.',
+  input: elevenMusicInput,
+  outputSchema: outputSchema(z.object({ asset: assetSchema, model: z.string(), songId: z.string().nullable() })),
+  annotations: { title: 'Compose music from a prompt', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  async run(input, context) {
+    const { prompt, durationSeconds, title, instrumental, projectId } = elevenMusicInput.parse(input)
+    if (!getProject(projectId)) throw new Error(`Project ${projectId} does not exist.`)
+    const trackId = resolveLandingTrack(projectId, input.trackId)
+    const dir = await ensureKindDir(projectId, 'generation', trackId)
+    const path = join(dir, `${slugify(title, 56)}-${uuidv4()}.mp3`)
+    assertNotAborted(context)
+    const result = await composeMusic({ prompt, durationSeconds, instrumental }, context?.signal)
+    await writeFile(path, result.bytes, { flag: 'wx' })
+    const origin = { provider: 'elevenlabs', model: ELEVEN_MUSIC_MODEL, songId: result.songId,
+      prompt, title, instrumental, customMode: false, music_length_ms: Math.round(durationSeconds * 1000),
+      output_format: ELEVEN_MUSIC_FORMAT }
+    try {
+      const asset = insertAsset({ projectId, trackId, kind: 'generation', name: title, path, origin })
+      return ok({ asset, model: ELEVEN_MUSIC_MODEL, songId: result.songId }, `Saved ${title} to Aurora.`)
+    } catch (error) {
+      throw new Error(`Audio saved at ${path}, but Aurora could not register the asset: ${String(error)}`)
+    }
+  }
+}
 
 const generateOp: Operation<{
   prompt: string
@@ -2668,6 +2707,7 @@ const operationDefinitions = [
   deleteStemSetOp,
   fetchWavOp,
   generateOp,
+  elevenMusicOp,
   soundsOp,
   coverOp,
   addVocalsOp,

@@ -4,6 +4,7 @@
 import { existsSync } from 'node:fs'
 import {
   getDbPath,
+  getElevenLabsKey,
   getKieKey,
   getMvsepKey,
   getProjectsDirectory,
@@ -21,6 +22,7 @@ export async function runStatus(): Promise<void> {
   console.log(`projects root:  ${getProjectsDirectory()}`)
   console.log(`suno key:       ${getSunoKey() ? 'configured' : getKieKey() ? 'kie fallback configured' : 'NOT SET'}`)
   console.log(`mvsep key:      ${getMvsepKey() ? 'configured' : 'NOT SET'}`)
+  console.log(`music API key:  ${getElevenLabsKey() ? 'configured' : 'NOT SET'}`)
 
   if (!dbExists) {
     console.log(

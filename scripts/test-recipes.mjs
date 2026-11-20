@@ -362,6 +362,38 @@ try {
   assert.equal(extSong.fields.continueAt, undefined)
   console.log('PASS returned lyrics kept apart, extend and section edits reuse into Create')
   assert.equal(networkAttempts, 0)
+
+  const musicKey = process.env.ELEVENLABS_API_KEY
+  process.env.ELEVENLABS_API_KEY = 'offline-test-key'
+  const musicPrompt = 'Quiet strings into a swelling orchestral finale'
+  let musicCalls = 0
+  globalThis.fetch = async (url, request) => {
+    musicCalls++
+    assert.equal(url, 'https://api.elevenlabs.io/v1/music?output_format=mp3_48000_192')
+    assert.equal(request.headers['xi-api-key'], 'offline-test-key')
+    assert.deepEqual(JSON.parse(request.body), {
+      prompt: musicPrompt, music_length_ms: 154000, model_id: 'music_v2_5', force_instrumental: false
+    })
+    return new Response(Buffer.from('ID3\x04\x00\x00'), { headers: { 'song-id': 'offline-song' } })
+  }
+  try {
+    const music = await call('aurora_generate_eleven_music', {
+      projectId: project.id, prompt: musicPrompt, title: 'Orchestral test', durationSeconds: 154, instrumental: false
+    })
+    assert.equal(musicCalls, 1)
+    assert.equal(music.songId, 'offline-song')
+    assert.equal(music.asset.kind, 'generation')
+    assert.equal(music.asset.origin.songId, 'offline-song')
+    assert.equal(music.asset.recipe.provider, 'elevenlabs')
+    assert.equal(music.asset.recipe.prompt, musicPrompt)
+    assert.equal(music.asset.recipe.credits.amount, null)
+    await call('aurora_reuse_prompt', { assetId: music.asset.id }, offline, true)
+    assert.equal(musicCalls, 1)
+    console.log('PASS Eleven Music request, asset provenance and no accidental Suno reuse')
+  } finally {
+    if (musicKey === undefined) delete process.env.ELEVENLABS_API_KEY
+    else process.env.ELEVENLABS_API_KEY = musicKey
+  }
   console.log('Recipe tests passed; no provider/network calls or real user data')
 } finally {
   closeDb()

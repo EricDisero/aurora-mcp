@@ -12,6 +12,7 @@ export interface AuroraKeyConfig {
   sunoApiKey?: string
   kieApiKey?: string
   mvsepApiKey?: string
+  elevenLabsApiKey?: string
   sunoApiBaseUrl?: string
 }
 
@@ -51,6 +52,10 @@ export function getSunoBaseUrlOverride(): string | undefined {
 
 export function getMvsepKey(): string | undefined {
   return process.env.MVSEP_API_KEY || readKeyConfig().mvsepApiKey
+}
+
+export function getElevenLabsKey(): string | undefined {
+  return process.env.ELEVENLABS_API_KEY || readKeyConfig().elevenLabsApiKey
 }
 
 export function requireMvsepKey(): string {
