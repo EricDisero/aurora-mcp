@@ -4,7 +4,7 @@
 
 This table is THE CONTRACT for the Suno-backed op schemas (`aurora_generate` / `aurora_cover` / `aurora_sounds` / `aurora_add_vocals` / `aurora_add_instrumental` / `aurora_extend` / `aurora_replace_section` / `aurora_mashup`) AND the app's Generate page: no param left unexposed, no param invented. kie.ai mirrors the same `/api/v1/*` shapes.
 
-Rule (locked 2026-06-10): **op schemas expose the full wire surface with sane defaults — curation is the app's job, never the MCP's.**
+Rule (2026-06-10): **op schemas expose the full wire surface with sane defaults — curation is the app's job, never the MCP's.**
 
 ---
 
