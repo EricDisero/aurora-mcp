@@ -18,10 +18,13 @@
     "test:stem-tools": "node scripts/test-stem-tools.mjs",
     "test:beat-grid": "node scripts/test-beat-grid.mjs",
     "clean": "rimraf packages/*/dist",
-    "publish:all": "npm run build && npm publish -w packages/shared --access public && npm publish -w packages/mcp --access public && npm publish -w packages/cli --access public"
+    "publish:all": "npm run build && npm publish -w packages/shared --access public && npm publish -w packages/mcp --access public && npm publish -w packages/cli --access public",
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx,cts,mts}\""
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@typescript-eslint/parser": "^8.73.0",
+    "eslint": "^9.39.5",
     "rimraf": "^5.0.0",
     "typescript": "^5.7.0"
   }

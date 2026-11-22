@@ -12,12 +12,13 @@ import { ALL_OPERATIONS } from '../packages/shared/dist/operations/index.js'
 const moduleUrl = (source) => 'data:text/javascript;base64,' + Buffer.from(ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
 }).outputText).toString('base64')
-const constantsUrl = moduleUrl(await readFile(new URL('../../aurora/src/shared/constants.ts', import.meta.url), 'utf8'))
-const protocolUrl = moduleUrl((await readFile(new URL('../../aurora/src/main/agent/protocol.ts', import.meta.url), 'utf8'))
-  .replace("from '@shared/constants'", `from '${constantsUrl}'`))
+const readApp = (path) => readFile(new URL(`../../aurora/src/${path}`, import.meta.url), 'utf8')
+const constantsUrl = moduleUrl(await readApp('shared/constants.ts'))
+const protocolUrl = moduleUrl((await readApp('shared/agent-protocol.ts'))
+  .replace("from './constants'", `from '${constantsUrl}'`))
 const protocol = await import(protocolUrl)
-const viewSource = await readFile(new URL('../../aurora/src/main/agent/view.ts', import.meta.url), 'utf8')
-const { ViewSession } = await import(moduleUrl(viewSource.replace("from './protocol'", `from '${protocolUrl}'`)))
+const viewSource = await readApp('main/agent/view.ts')
+const { ViewSession } = await import(moduleUrl(viewSource.replace("from '@shared/agent-protocol'", `from '${protocolUrl}'`)))
 assert.equal(protocol.AGENT_PROTOCOL_VERSION, DESKTOP_PROTOCOL_VERSION)
 assert.deepEqual(protocol.AGENT_CAPABILITIES, DESKTOP_CAPABILITIES)
 assert.deepEqual(protocol.AGENT_PAGES, DESKTOP_PAGES)
@@ -43,7 +44,6 @@ globalThis.auroraBridgeFixture = fixtures
 const fixtureModule = (names) => moduleUrl(names.map((name) =>
   `export const ${name} = globalThis.auroraBridgeFixture.${name}`).join('\n'))
 const storeModule = fixtureModule(['create'])
-const readApp = (path) => readFile(new URL(`../../aurora/src/${path}`, import.meta.url), 'utf8')
 const loadStore = async (path) => import(moduleUrl((await readApp(path))
   .replace("from 'zustand'", `from '${storeModule}'`).replace("from '@shared/constants'", `from '${constantsUrl}'`)))
 const { useComposerStore } = await loadStore('renderer/src/stores/composerStore.ts')

@@ -1,120 +1,37 @@
-# aurora-mcp — Claude code notes
+# Aurora MCP and CLI
 
-MCP server + CLI + skills for Aurora at `C:\Coding Projects\aurora\aurora`. Storage and provider operations share disk + SQLite (WAL); live view tools use the app's authenticated loopback bridge.
+The Aurora agent layer shares disk and WAL SQLite with the desktop app and uses its authenticated loopback bridge for live view tools. The app checkout is next door or specified by `AURORA_REPO`. Read the parent workspace's instructions for shared rules.
 
-## Layout
+## Ownership and invariants
 
-```
-aurora-mcp/
-├── package.json                ← npm workspaces root (build / typecheck / publish:all)
-├── smithery.yaml               ← Smithery registry config (stdio via npx) — NOT submitted yet
-├── scripts/sync-separation.mjs ← app → generated separation mirrors; --check detects drift
-├── scripts/{smoke-mcp,test-mcp-contract}.mjs ← free isolated protocol/audio tests
-└── packages/
-    ├── shared/                 ← @ericdisero/aurora-shared
-    │   skills/*.md             ← bundled agent recipes (single source)
-    │   scripts/embed-skills.mjs← prebuild: skills/*.md → src/skills/content.ts (generated)
-    │   src/
-    │     paths.ts              ← userData/settings/projects-root resolution sans Electron
-    │     config.ts             ← provider keys: env > ~/.aurora/config.json
-    │     db.ts                 ← better-sqlite3, KNOWN_SCHEMA_VERSION (lockstep w/ app)
-    │     storage/*.ts          ← ports of aurora src/main/storage
-    │     providers/{suno,mvsep}.ts ← provider clients (+ single-shot poll fetchers)
-    │     separation/*.ts       ← GENERATED app routes, identity/content checks, runner, contracts/catalog
-    │     extract-catalog.ts    ← GENERATED app extraction catalog, planned calls carry routeId
-    │     {split,extract}.ts    ← durable orchestration using the generated checked routes
-    │     separation-tools.ts   ← free route discovery, provenance and local checks
-    │     jobs.ts               ← background-job manifests (userData/agent-jobs/)
-    │     sidecars.ts           ← RVC/MIDI/beat python spawns (need AURORA_REPO env)
-    │     audio/{ffmpeg,wav}.ts ← @ffmpeg-installer ops + RIFF codec (port)
-    │     operations/index.ts   ← ALL_OPERATIONS: single source of truth for tool surface
-    ├── mcp/                    ← @ericdisero/aurora-mcp-server (bin: aurora-mcp-server)
-    └── cli/                    ← @ericdisero/aurora-cli (bin: aurora)
-        src/commands/{op,install-skills,keys,status,mcp}.ts
-```
+- Both adapters register `ALL_OPERATIONS` in `packages/shared/src/operations/index.ts`. Add operations there once. Schemas expose the full provider controls with sane defaults. The app curates its surface.
+- The shared package owns paths, provider config (env before `~/.aurora/config.json`), jobs (`userData/agent-jobs/`), sidecars and audio utilities. MCP and CLI are adapters.
+- `db.ts` mirrors app `src/main/database/migrations.ts`. Port every migration and bump `KNOWN_SCHEMA_VERSION` in the same session. Refuse newer DBs. v6 renamed the leftover stem to `other` without moving WAVs, v7 added sets/lanes, and v8 added recipes to assets, stems, extractions and sets.
+- Keep `storage/*.ts` in lockstep with app `src/main/storage/`. Edit separation contracts, extraction catalog and recipes in the app, then run `scripts/sync-separation.mjs`. Typecheck catches drift in generated `separation/*.ts`, `extract-catalog.ts` and `recipe.ts`.
+- Resolve exact output keys and run route content checks before landing. Give every submission a unique upload name. Failed identity or content checks save no stems for that route. Report family and replay limits after a pass.
+- Persist split/extract work before spending. Use `startSplitJob(assetId)` then `advanceJob`; untracked `createSplitJobs` refuses. Split/extract queue by default and `estimateOnly` is free. Reuse active splits or seven valid distinct stems.
+- Status advances by default and may spend. `advance:false` and `list_jobs` are local snapshots. `waitSeconds` is 0–30. MCP advances only jobs started or resumed on its connection; CLI advances explicitly. Cancellation is durable and stops later units after the in-flight interaction settles. Accepted provider work may continue without refund. Failed or partial jobs keep attempts, outputs and diagnostics with `isError:true`.
+- Persist downloads; expiring `streamUrls` are preview-only. Every generation failure reads `record-info` for `errorCode` and `errorMessage` via `generationFailureDetail()` (app mirror in `suno-client.ts`).
+- Suno can reject reuploads of catalog output with 413. Extend and replace-section use source task/audio IDs when present. `cover-suno` is cover art. Recheck live docs before declaring a parameter absent. [Suno parameter contract](docs/suno-param-surface.md). The model enum, normalization and default live in `providers/suno.ts`.
+- Destructive operations require `confirm:true`, including deleting assets, projects and stored stem sets. Deleting a set removes rows only. Commit and push finished work by name under the vault's rule 2.
 
-## Hard rules
+## App and tool contracts
 
-- **Never duplicate operation logic.** Both surfaces register the same `ALL_OPERATIONS` array. New tool = one edit in `packages/shared/src/operations/index.ts`.
-- **Op schemas expose the FULL wire surface with sane defaults — curation is the app's job, never the MCP's** (locked 2026-06-10; the agent layer ships with MORE control than the app, never less). Param contract for the Suno ops: `docs/suno-param-surface.md`.
-- **Schema lockstep with the aurora app.** `db.ts` mirrors `aurora/src/main/database/migrations.ts` through v8 (v6: leftover stem id `other`, WAV paths unchanged; v7: stored `stem_sets` and `stem_lanes`; v8: recipe columns on assets, stems, extractions and stored sets). `KNOWN_SCHEMA_VERSION` refuses newer DBs. Port every new app migration here in the same session and bump that constant.
-- **Storage-semantics lockstep.** `storage/*.ts` ports the app's modules; behavior changes go into BOTH codebases or neither. Split/extract orchestration consumes the app's generated separation contract (table below).
-- **Never edit generated mirrors.** `packages/shared/src/separation/*.ts`, `extract-catalog.ts` and `recipe.ts` are GENERATED from the app by `scripts/sync-separation.mjs` (with ESM import adaptation/provider-interface extraction). Fix the app, then resync. `--check` runs in `npm run typecheck`; drift fails the check.
-- **Check before landing.** Use canonical exact-key resolution and route content checks, never substring/list-order matching. Every submission uses a unique upload name. Failed identity/content checks save no stems for that route. A check pass is not proof of musical purity; report family/replay limits.
-- **Persist before spending.** Split integration uses `startSplitJob(assetId)` then `advanceJob`; untracked `createSplitJobs` is refused. Split/extract default to queued background jobs. Status defaults to advancement and can spend; `advance:false` and `list_jobs` are local snapshots. MCP advances only jobs started/resumed through its connection; CLI callers advance explicitly. Cancellation stops subsequent units after any in-flight interaction settles; accepted provider work may still run without refund.
-- **Provider URLs expire server-side.** Always download-and-persist; `streamUrls` are preview-only, never stored as asset paths.
-- **NEVER throw a provider failure as status-only.** `GENERATE_AUDIO_FAILED` hides distinct causes. Parse `record-info`'s `errorCode` + `errorMessage` at EVERY throw site (`generationFailureDetail()` in `providers/suno.ts`; app mirror in `suno-client.ts`).
-- **Cover-of-a-Suno-track does not work by re-upload.** Upload-cover/extend/mashup/replace-section can reject Suno output with `errorCode 413` (existing catalog recording). Iterate with `taskId`/`audioId` routes; extend/replace_section select them when source assets carry provider ids. `cover-suno` is cover ART. Findings/scope: `docs/suno-param-surface.md`.
-- **Re-verify live docs before declaring a param absent.** Param reference: `docs/suno-param-surface.md`. **Model enum + default live ONLY in `providers/suno.ts` (`SUNO_MODELS`, `DEFAULT_SUNO_MODEL`, `normalizeModel`)**; ops/docs reference it, never restate it.
-- **Destructive ops require `confirm: true`** (delete_asset, delete_project). Splits reuse active work or seven valid distinct stems without re-spending.
-- Each chat commits and pushes its own finished work, staged by name, under the vault's CLAUDE.md rule 2.
+- **View and playback.** `clients/desktop.ts` discovers `~/.aurora/agent-connection.json` and checks requested capabilities. The app's `src/main/agent/`, `src/shared/agent-protocol.ts` and renderer `agent/` queue use `requestId` and optional `expectedRevision`. Switch project via `selectProject` before dependent actions. State includes composer draft and playback. Composer loads validate fields and report retained values. Acks are applied, partial, rejected or uncertain. Timeout cannot confirm application; duplicates return the first result per process. Reads are null when disconnected. Verify mode publishes in its own profile via the `agentConnectionPath` probe.
+- **Preview.** `previewStore` public actions only, with no provider calls. Play uses an asset in the open project and awaits playback or error. Repeated play keeps or resumes it. Pause retains position. Seek clamps absolute seconds. State reports asset ID/name, playing/loading, position/duration and error.
+- **Storage.** Follow app `storage/{projects,assets,references,tracks,stem-view,stem-sets}.ts`. Track moves carry files, stems, extracts and reference paths. Stem views derive from splits/extractions and stored sets reference files in place. Split-job import mirrors app `ingest/split-job.ts`; completed jobs and canonical lanes only, legacy `ee` wins over intermediate `other`, and retries reuse the set.
+- **Stem tools.** `stem-tools.ts` reads exact sets/lanes offline. Native-rate decoding, BS.1770-4 and 4× true peak. Peaks cap at 2,000 points and 16 lanes. Export originals or aligned 44.1 kHz float32 ranges/mixes with manifests and no overwrites. Bake gain, let solo override mute, and report clipping without limiting or normalization.
+- **Generation.** App `ipc/generation.ts` and bridge `lib/kie.ts` own generation/cover precedents; sounds follows bridge `commands/sounds.ts`. Generate/sounds save MP3 and audioId. Cover keeps the eight-minute cap, AIFF/FLAC conversion, custom-mode rule and model normalization. Blocking cover tries WAV; queued cover lands MP3. Fetch WAV repoints the asset and keeps MP3. Vocals/instrumental share the cover upload pipeline. Extend, replace and two-upload mashup land source-linked cover assets, mashup linked to A. Credits mirror Kie's credit lookup and MVSEP `/api/app/user`.
+- **Separation.** App `src/shared/separation/`, `src/main/split/run-route.ts` and shared types feed generated contracts. Local `split.ts` tracks three routes, lands checked outputs progressively and computes hats/Other locally. `extract.ts` advances route IDs sequentially, keeping attempts and partial outputs. `key-detect.ts` and `storage/extractions.ts` are app ports. `separation-tools.ts` lists routes and replays `checkLocalOutputs` for free. Provenance separates recorded verdicts from replay with missing auxiliaries.
+- **Sidecars and recipes.** Pitch/convert port bridge `ffmpeg-ops.ts`; RVC/MIDI port app `rvc/upscale.ts` and `midi/rip.ts` via `AURORA_REPO`. Beat This (`beat-grid.ts`) uses `~/.venvs/aurora-beats` or `AURORA_BEATS_PYTHON`, free/read-only. Recipes use the generated app mirror. Read/copy includes lineage/source names; prompt/reference reuse offers free plans and optional composer-load acks. Variations spend only with `confirm:true`, two takes per call. Prompt guides follow Slates' `resolveGuideTopic`.
+- Stack is retired. Navigation, working-asset selection and Library folder/checkbox selection use the bridge. Live stem-lane controls and mastering remain follow-ups. The Stack history is in vault `business/projects/aurora-docs/stack-feature-historical-reference.md`.
 
-## Op ↔ source-module contract table
+## Development and publishing
 
-Storage/provider ports follow these app sources; agent jobs and surface adapters are local extensions.
+`npm run build` builds shared → MCP → CLI. Run `npm run lint`, `npm run typecheck` and relevant free checks (`smoke`, `test:contract`, `test:surface`, `test:agent-bridge`, `test:stem-sets`, `test:recipes`, `test:stem-tools`, `test:beat-grid`). Beat grid skips the engine without its venv. Set `AURORA_USER_DATA` to a temporary directory for manual writes.
 
-| Op | Source / adapter contract |
-|---|---|
-| aurora_get_view / set_view | App `src/main/agent/{server,auth,view,protocol}.ts` + renderer `agent/{actions,view,selection}.ts`; `clients/desktop.ts` discovers `~/.aurora/agent-connection.json`, checks every requested capability and sends requestId + optional expectedRevision. `projectId` switches via `selectProject` before dependent actions. Reports include the live `composerDraft` and preview `playback`; composer loads validate control values and report retained fields. Renderer acknowledgements: applied, partial, rejected, uncertain. Timeout never confirms application. Duplicate ids return the first result per app process; reads return null when disconnected. Verify mode publishes inside its profile, exposed by `agentConnectionPath` probe. |
-| aurora_play / pause / seek | Same acknowledged view queue with `preview-play`, `preview-pause`, `preview-seek` capabilities; renderer uses only `previewStore` public actions. Play takes an asset in the open project and waits for playback or error; repeated play keeps/resumes the current asset. Pause retains position; seek takes absolute seconds, clamped to known duration. State reports playing id/name, playing/loading flags, position/duration seconds and error. No provider calls. |
-| aurora_get_credits | `tools/bridge/lib/kie.ts getRemainingCredits` + MVSEP `/api/app/user` (live-docs verified 2026-06-10) |
-| aurora_get_workspace_state / list_projects / create_project / rename_project / delete_project | `src/main/storage/projects.ts` |
-| aurora_list_assets / import_file / add_reference / delete_asset | `src/main/storage/assets.ts` (+`references.ts`) |
-| aurora_get_stem_view / create_stem_set / delete_stem_set | `src/main/storage/stem-view.ts` + `stem-sets.ts`; split/extraction derived, stored sets reference files in place. Deletes require confirmation and remove rows only. |
-| aurora_get_stem_peaks / measure_stems / export_stems | Local `stem-tools.ts` reads exact sets/lanes from `storage/stem-view.ts`; native-rate decoding, `audio/loudness.ts` BS.1770-4 mono/stereo + 4x true peak. Free/offline; peaks bounded to 2000 points/16 lanes. Exports write originals or aligned 44.1 kHz float32 ranges/mixes and manifests without overwriting. Mix gain is baked in; exclusive solos override mute; clipping is reported without limiting/normalisation. |
-| aurora_import_split_job | `src/main/ingest/split-job.ts`; completed bridge jobs, canonical lanes only, legacy `ee` wins over intermediate `other`, repeated imports reuse the set. Free and local. |
-| aurora_create/list/rename/delete_track / set_asset_track / favorite_asset | `src/main/storage/tracks.ts` + `assets.ts setAssetTrack/setAssetFavorite` (moves file/stems/extracts and reference paths) |
-| aurora_fetch_wav | `suno-client.ts createWavConversion/pollWavConversion` + report §Phase 3 ("asset re-points at WAV, MP3 stays") |
-| aurora_generate | `ipc/generation.ts generation:generate` landing + `kie.ts createGeneration` |
-| aurora_sounds | `tools/bridge/commands/sounds.ts` + project landing per generation:generate |
-| aurora_cover | `ipc/generation.ts runCover` (8-min cap, AIFF/FLAC standardize, custom-mode rule, model dots→underscores, best-effort WAV) |
-| aurora_add_vocals / add_instrumental | Local `providers/suno.ts`, shared cover upload pipeline, generation landing via jobs; wire contract: `docs/suno-param-surface.md` |
-| aurora_extend / replace_section / mashup | MCP-only Suno edits in `providers/suno.ts`: extend/replace_section use source provider ids when available, otherwise upload; mashup uploads both sources. Land source-linked `cover` assets via generation jobs (mashup linked to A); wire contract: `docs/suno-param-surface.md` |
-| aurora_split | App `src/shared/separation/{routes,identify,content-check,mvsep-catalog.generated}.ts`, `src/main/split/run-route.ts`, separation contracts in `src/shared/types/index.ts` → GENERATED `separation/*.ts`. Local `split.ts`/`jobs.ts` track three routes, check before progressive landing and compute hats/Other locally. `estimateOnly` is free. |
-| aurora_extract | Same generated checked routes + app `src/shared/extract-catalog.ts` → GENERATED `extract-catalog.ts`. Local `extract.ts`/`jobs.ts` advance the routeId plan sequentially, preserving attempts and partial outputs; `key-detect.ts`/`storage/extractions.ts` remain app ports. `estimateOnly` is free. |
-| aurora_list_separation_routes | Local `separation-tools.ts`, backed by generated app routes/catalog; returns options, output keys, quality/evidence and checks without provider calls. |
-| aurora_check_separation_result | Local `separation-tools.ts` + operation adapter replay generated `checkLocalOutputs`; job provenance distinguishes recorded checks from replay when auxiliary files are unavailable. Free, returns verdict/metrics/limitations. |
-| aurora_cancel_job | Local `jobs.ts cancelJob`: durable cancellation intent; stops future units, retains saved files, no provider refund. |
-| aurora_get_job_status / list_jobs | Local `jobs.ts` manifests + provider single-shot polls. Status supports `advance` and `waitSeconds` 0–30; advancement can spend. Snapshots never advance. Failed/partial results retain attempts, outputs and diagnostics with `isError:true`. |
-| aurora_pitch_shift / convert | `tools/bridge/lib/ffmpeg-ops.ts` + `commands/{pitch,convert}.ts` |
-| aurora_rvc_upscale / rip_midi | `src/main/rvc/upscale.ts` / `src/main/midi/rip.ts` (same args; resolution via AURORA_REPO) |
-| aurora_beat_grid | App `sidecar-beats/beat_grid.py` (Beat This!) in its own venv, `~/.venvs/aurora-beats`, made by `setup_venv.py`; `AURORA_BEATS_PYTHON` overrides. Free, read-only; core `beat-grid.ts`. |
-| aurora_get_prompting_guide | slates-mcp `resolveGuideTopic` pattern |
-| aurora_get_recipe | App `src/shared/recipe.ts` → generated mirror; local asset/stem/set recipe and lineage read. |
-| aurora_copy_recipe | Same recipe mirror; readable text with source asset names. Free/local. |
-| aurora_reuse_prompt | Same recipe mirror; words-only call plan, optional desktop `composer-load` acknowledgement. No spend. |
-| aurora_reuse_reference | Same recipe mirror; source-preserving plan and optional `composer-load`. No spend. |
-| aurora_make_variations | Same recipe mirror; free plan until `confirm:true`, then the target operation's background jobs (two takes per call). |
+Use `aurora run <op> --key value`. Help is generic; get operation arguments from the Zod input. Pass booleans explicitly and negative tags as one comma-separated string.
 
-Known intentional deviations: (1) background cover lands MP3s only — WAV via fetch_wav (blocking cover keeps inline WAVs like the app); (2) generate/sounds land MP3 + audioId (the app's behavior) — bridge's default-WAV behavior is NOT carried (cost discipline).
+Release from root after updating the root and three package versions, exact shared pins, README version and npm lockfile. `npm run publish:all` publishes shared, server, CLI in order under `@ericdisero/*`. Token lives in `~/.npmrc`. See vault `business/operations/account-logins.md` for account/scope. GitHub is public; Smithery config is unsubmitted.
 
-**Scope:** Stack was removed from both projects. Generic navigation, working-asset selection and Library folder/checkbox selection use the live bridge. Offline stem measurements and exports use the local tools above; live stem-lane controls and mastering remain follow-ups. Historical Stack reference: second-brain `business/projects/aurora-docs/stack-feature-historical-reference.md`.
-
-## Build / test
-
-```bash
-npm install
-npm run build            # shared → mcp → cli
-npm run typecheck        # mirror --check → build shared → check MCP/CLI
-npm run smoke            # isolated stdio protocol checks, free
-npm run test:contract    # isolated MCP audio contracts, free
-npm run test:surface     # offline operation surface checks, free
-npm run test:agent-bridge # fake loopback desktop + actual command queue, no Electron
-npm run test:stem-sets   # isolated storage/read/import fixtures, free
-npm run test:recipes     # isolated v8 backfill, recipe reads/reuse and variation plans, offline
-npm run test:stem-tools  # synthetic waveform/loudness/export fixtures, offline
-npm run test:beat-grid   # synthetic house loop; skips the engine run without the venv
-node packages/cli/dist/index.js status
-```
-
-**Invocation is `aurora run <op> --key value`**; there is no `aurora op`. `--help` on a `run` line prints generic help, never the op's schema: read its zod `input` block in `packages/shared/src/operations/index.ts`. Booleans pass as `--instrumental true`; `negativeTags` is ONE comma-separated string.
-
-For manual write-heavy tests set `AURORA_USER_DATA=%TEMP%\aurora-mcp-test`, never real userData. Typecheck requires the app checkout beside this repo or `AURORA_REPO` pointing to it.
-
-## Publishing
-
-**Version:** the `version` in `package.json` is the one home; the opening paragraph of `README.md` repeats it. To release: bump all three package versions, the exact shared pins in MCP/CLI and the README version line, `npm install` (lockfile), then `npm run publish:all` at the root (shared, mcp-server, cli in that order). Token: `~/.npmrc`; scope/account details: second-brain `business/operations/account-logins.md`. Packages use `@ericdisero/*`; repository: public `github.com/EricDisero/aurora-mcp`. Smithery config exists but has not been submitted.
-
-## Skills
-
-`packages/shared/skills/*.md` is the single source, embedded at build. Derive names/count from those files or `aurora_get_prompting_guide`; do not keep another list. Frontmatter `name:` + `description:` required. `aurora install-skills` writes `.claude/skills/<name>/SKILL.md`. Track-S genre-craft skills come post-UEBS.
+`packages/shared/skills/*.md` is the skill source. Require `name` and `description` frontmatter and derive names/count there. Build embeds skills; `aurora install-skills` writes `.claude/skills/<name>/SKILL.md`. Track-S genre skills follow UEBS.

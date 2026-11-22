@@ -3,7 +3,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 
-// Wire contract mirrored from aurora/src/main/agent/protocol.ts; the free bridge test checks it.
+// The bridge test checks this wire contract against the app's src/shared/agent-protocol.ts.
 export const DESKTOP_PROTOCOL_VERSION = 1
 export const DESKTOP_CAPABILITIES = ['view', 'view-set', 'request-ack', 'composer-load', 'project-set',
   'preview-play', 'preview-pause', 'preview-seek', 'composer-read'] as const
